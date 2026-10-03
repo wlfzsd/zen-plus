@@ -75,8 +75,6 @@ func main() {
 	uninstallCA := flag.Bool("uninstall-ca", false, "Uninstall the CA and exit")
 	flag.Parse()
 
-	configureMemoryBounds()
-
 	err := logger.SetupLogger()
 	if err != nil {
 		log.Printf("failed to setup logger: %v", err)
