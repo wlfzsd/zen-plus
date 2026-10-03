@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
+	"time"
 
 	"github.com/irbis-sh/zen-desktop/internal/app"
 	"github.com/irbis-sh/zen-desktop/internal/autostart"
@@ -28,11 +30,52 @@ const (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// Memory bounds (2026-10-03): stock Zen runs on Go's default GOGC=100, which
+// lets the heap grow to twice the live set before collecting and hands freed
+// memory back to the OS only lazily. As a system-wide proxy serving every
+// application's traffic around the clock, allocation bursts from request
+// filtering ratchet the resident set up to multi-GiB peaks that never come
+// back down (upstream issue #388 proposed SetGCPercent(5), never merged).
+// These bounds keep the heap target close to the live set while leaving
+// headroom so the soft limit never becomes what drives collection:
+//   - GCPercent 40: collect after each ~40% of heap growth (target = live
+//     set × 1.4 instead of × 2); the GC is concurrent, and the extra cycles
+//     are cheap for an I/O-bound proxy;
+//   - MemoryLimit 1.5 GiB: a soft ceiling far above the actual live set
+//     (rule trees, certificate cache, connection pools) that only engages
+//     during extreme bursts, bounding the worst case.
+func configureMemoryBounds() {
+	const (
+		gcPercent             = 40
+		memoryLimitMiB        = 1536
+		memoryReleaseInterval = 30 * time.Minute
+	)
+
+	debug.SetGCPercent(gcPercent)
+	debug.SetMemoryLimit(memoryLimitMiB << 20)
+	go releaseMemoryPeriodically(memoryReleaseInterval)
+	log.Printf("memory bounds set: GCPercent=%d, soft memory limit=%d MiB, periodic release every %v", gcPercent, memoryLimitMiB, memoryReleaseInterval)
+}
+
+// releaseMemoryPeriodically returns idle heap memory to the OS on a fixed
+// schedule: debug.FreeOSMemory forces a full collection followed by a
+// scavenge, so long idle stretches (nights, unattended machines) do not keep
+// the last burst's peak resident. Same deliberate never-exiting shape as the
+// certificate cache cleanup goroutine.
+func releaseMemoryPeriodically(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		debug.FreeOSMemory()
+	}
+}
+
 func main() {
 	startOnDomReady := flag.Bool("start", false, "Start the service when DOM is ready")
 	startHidden := flag.Bool("hidden", false, "Start the application in hidden mode")
 	uninstallCA := flag.Bool("uninstall-ca", false, "Uninstall the CA and exit")
 	flag.Parse()
+
+	configureMemoryBounds()
 
 	err := logger.SetupLogger()
 	if err != nil {
