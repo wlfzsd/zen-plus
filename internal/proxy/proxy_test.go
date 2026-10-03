@@ -586,3 +586,30 @@ func (selfSignedCertGenerator) GetCertificate(host string) (*tls.Certificate, er
 		PrivateKey:  key,
 	}, nil
 }
+
+// TestAddTransparentHostDeduplicates pins the memory property of the ignored-hosts
+// list: a TLS-failing host is appended once, and repeat failures (cert-pinned apps
+// retrying for days) must not grow the list. Also covers the zero-value Proxy path:
+// addTransparentHost works without NewProxy initialization (2026-10-03 memory audit -
+// this was the only unbounded container in the codebase).
+func TestAddTransparentHostDeduplicates(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+	for range 3 {
+		p.addTransparentHost("pinned.example")
+	}
+	if len(p.transparentHosts) != 1 {
+		t.Fatalf("transparentHosts holds %d entries, want 1 (duplicates must be skipped)", len(p.transparentHosts))
+	}
+
+	if p.shouldMITM("pinned.example") {
+		t.Fatal("pinned.example is a transparent host, should not be MITM'd")
+	}
+	if p.shouldMITM("sub.pinned.example") {
+		t.Fatal("subdomains of a transparent host should not be MITM'd")
+	}
+	if !p.shouldMITM("other.example") {
+		t.Fatal("other.example is unaffected, should still be MITM'd")
+	}
+}

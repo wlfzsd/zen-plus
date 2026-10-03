@@ -61,6 +61,7 @@ type Proxy struct {
 	localHost             string
 	localHandler          http.Handler
 	transparentHosts      []string
+	transparentHostsSet   map[string]struct{}
 	transparentHostsMu    sync.RWMutex
 }
 
@@ -86,6 +87,8 @@ func NewProxy(filter filter, certGenerator certGenerator, port int, shouldProxy 
 		shouldProxy:   shouldProxy,
 		localHost:     localHost,
 		localHandler:  localHandler,
+
+		transparentHostsSet: make(map[string]struct{}),
 	}
 
 	p.netDialer = &net.Dialer{
@@ -532,10 +535,22 @@ func (p *Proxy) shouldMITM(host string) bool {
 }
 
 // addTransparentHost adds a host to the list of hosts that should be MITM'd.
+// Duplicate entries are skipped: TLS-failing hosts (cert-pinned apps retrying
+// over days) used to append a fresh copy of the same host on every failure,
+// growing the slice without bound and stretching the linear scan in
+// shouldMITM (2026-10-03 memory audit: the only unbounded container in the
+// codebase).
 func (p *Proxy) addTransparentHost(host string) {
 	p.transparentHostsMu.Lock()
 	defer p.transparentHostsMu.Unlock()
 
+	if p.transparentHostsSet == nil {
+		p.transparentHostsSet = make(map[string]struct{})
+	}
+	if _, ok := p.transparentHostsSet[host]; ok {
+		return
+	}
+	p.transparentHostsSet[host] = struct{}{}
 	p.transparentHosts = append(p.transparentHosts, host)
 }
 
