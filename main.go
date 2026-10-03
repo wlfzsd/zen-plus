@@ -81,6 +81,9 @@ func main() {
 	if err != nil {
 		log.Printf("failed to setup logger: %v", err)
 	}
+	// After SetupLogger so the bounds land in application.log where they can
+	// be verified at runtime (2026-10-03).
+	configureMemoryBounds()
 	log.Printf("initializing the app; version=%q", config.Version)
 
 	appConfig, err := config.New()
