@@ -184,6 +184,16 @@ func applyUpstreamChain(p *Proxy) {
 		},
 		Proxy:        nil,
 		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+		// Pool caps mirrored from the stock transport (2026-10-03): the
+		// zero-value Transport caps total idle connections at infinity, and
+		// the HTTPS leg rides HTTP/1.1 under the chain (TLSNextProto emptied
+		// above), so every request is a connection. The stock per-host 16
+		// keeps connections alive for reuse instead of re-handshaking with a
+		// fresh mirrored spec per request - fewer handshakes, less allocation
+		// churn - while the global 512 bounds the idle pool; both are pruned
+		// by the chained IdleConnTimeout.
+		MaxIdleConns:        maxIdleConns,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 	}
 	applyChainedTransportHygiene(httpsTransport)
 	p.requestTransportHTTPS = httpsTransport
