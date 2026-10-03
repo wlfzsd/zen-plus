@@ -48,18 +48,20 @@ type ShouldProxyFunc func(processPath string) bool
 
 // Proxy is a forward HTTP/HTTPS proxy that can filter requests.
 type Proxy struct {
-	filter             filter
-	certGenerator      certGenerator
-	port               int
-	server             *http.Server
-	requestTransport   http.RoundTripper
-	requestClient      *http.Client
-	netDialer          *net.Dialer
-	shouldProxy        ShouldProxyFunc
-	localHost          string
-	localHandler       http.Handler
-	transparentHosts   []string
-	transparentHostsMu sync.RWMutex
+	filter                filter
+	certGenerator         certGenerator
+	port                  int
+	server                *http.Server
+	requestTransport      http.RoundTripper
+	requestTransportHTTPS http.RoundTripper
+	requestClient         *http.Client
+	netDialer             *net.Dialer
+	upstreamChain         *chainDialer
+	shouldProxy           ShouldProxyFunc
+	localHost             string
+	localHandler          http.Handler
+	transparentHosts      []string
+	transparentHostsMu    sync.RWMutex
 }
 
 // NewProxy creates a proxy. localHost and localHandler, when set, name a host
@@ -109,6 +111,8 @@ func NewProxy(filter filter, certGenerator certGenerator, port int, shouldProxy 
 			return http.ErrUseLastResponse
 		},
 	}
+
+	applyUpstreamChain(p)
 
 	return p, nil
 }
@@ -335,6 +339,19 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 		return
 	}
 
+	// Capture the client's ClientHello before TLS termination: it is replayed
+	// verbatim on the upstream leg (mimic), so the browser keeps its own TLS
+	// fingerprint end to end. Failure falls back to stock Go TLS - never to a
+	// canned profile.
+	helloRaw, clientConn, err := peekClientHello(clientConn)
+	if err != nil {
+		log.Printf("peeking ClientHello(%s): %v", redacted.Redacted(connReq.Host), err)
+		helloRaw = nil
+	}
+	// The raw hello - not a parsed spec - is carried downstream: every upstream
+	// dial parses a fresh spec (ApplyPreset mutates specs in place, so a parsed
+	// spec must never be reused across handshakes).
+
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*tlsCert},
 		NextProtos:   []string{"h2", "http/1.1"},
@@ -367,7 +384,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 		// block Zen's own assets.
 		handler = p.localHandler
 	} else {
-		handler = p.connectHandler(connReq, host, ln, processInfo)
+		handler = p.connectHandler(connReq, host, ln, processInfo, helloRaw)
 	}
 
 	srv := &http.Server{
@@ -387,7 +404,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 }
 
 // connectHandler returns an http.Handler that processes requests on a CONNECT-tunnelled TLS connection.
-func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleConnListener, processInfo process.Info) http.Handler {
+func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleConnListener, processInfo process.Info, helloRaw []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Host = connReq.Host
 		req.URL.Scheme = "https"
@@ -460,7 +477,15 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 		}
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
-		resp, err := p.requestTransport.RoundTrip(req)
+		// HTTPS over an active upstream chain rides the mimic-TLS transport,
+		// replaying this connection's captured ClientHello; everything else -
+		// plain http, and https without a chain - uses the stock transport.
+		req = req.WithContext(newMimicContext(req.Context(), helloRaw))
+		rt := p.requestTransport
+		if req.URL.Scheme == "https" && p.requestTransportHTTPS != nil {
+			rt = p.requestTransportHTTPS
+		}
+		resp, err := rt.RoundTrip(req)
 		roundTripMutex.Lock()
 		roundTripDone = true
 		roundTripMutex.Unlock()
@@ -517,7 +542,7 @@ func (p *Proxy) addTransparentHost(host string) {
 // tunnel tunnels the connection between the client and the remote server
 // without inspecting the traffic.
 func (p *Proxy) tunnel(w net.Conn, r *http.Request) {
-	remoteConn, err := p.netDialer.DialContext(r.Context(), "tcp", r.Host) // #nosec G704 -- this is a proxy; forwarding connections is its purpose
+	remoteConn, err := p.tunnelDialContext(r.Context(), "tcp", r.Host) // #nosec G704 -- this is a proxy; forwarding connections is its purpose
 	if err != nil {
 		log.Printf("dialing remote(%s): %v", redacted.Redacted(r.Host), err)
 		w.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))

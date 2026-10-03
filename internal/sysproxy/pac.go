@@ -34,7 +34,20 @@ var (
 )
 
 // renderPac returns the PAC file content for the given proxy port and user-configured excluded hosts.
-func renderPac(proxyPort int, userConfiguredExcludedHosts []string) []byte {
+// When chainActive is set (an upstream proxy is configured), the embedded
+// sensitive-host exclusions are dropped: on censored networks those hosts are
+// reachable only through the chain, and a DIRECT answer in the PAC would make
+// the browser bypass Zen entirely. User-configured exclusions are always
+// honored in every mode - the user's explicit choice outranks the chaining
+// default (a host may need to opt out of MITM for any reason, e.g. strict
+// server-side risk control).
+func renderPac(proxyPort int, userConfiguredExcludedHosts []string, chainActive bool) []byte {
+	var excludedHosts []string
+	if chainActive {
+		excludedHosts = append(excludedHosts, userConfiguredExcludedHosts...)
+	} else {
+		excludedHosts = buildExcludedHosts(userConfiguredExcludedHosts)
+	}
 	var buf bytes.Buffer
 	pacTemplate.Execute(&buf, struct {
 		ProxyPort         int
@@ -43,7 +56,7 @@ func renderPac(proxyPort int, userConfiguredExcludedHosts []string) []byte {
 	}{
 		ProxyPort:         proxyPort,
 		LocalEndpointHost: constants.LocalEndpointHost,
-		ExcludedHosts:     buildExcludedHosts(userConfiguredExcludedHosts),
+		ExcludedHosts:     excludedHosts,
 	})
 	return buf.Bytes()
 }

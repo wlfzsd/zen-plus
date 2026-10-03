@@ -28,6 +28,7 @@ require (
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/getlantern/byteexec v0.0.0-20220903142956-e6ed20032cfd // indirect
 	github.com/getlantern/context v0.0.0-20220418194847-3d5e7a086201 // indirect
 	github.com/getlantern/errors v1.0.3 // indirect
@@ -55,6 +56,7 @@ require (
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/refraction-networking/utls v1.6.7 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect

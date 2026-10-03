@@ -46,12 +46,15 @@ func (m *Manager) SetPACPort(pacPort int) {
 }
 
 // Set configures the system proxy to use the proxy server listening on the given port.
-func (m *Manager) Set(proxyPort int, userConfiguredExcludedHosts []string, shouldProxy ShouldProxyFunc) error {
+// When chainActive is set (an upstream proxy is configured), sensitive-host PAC
+// exclusions are dropped so auth/login hosts flow through the chain instead of
+// going DIRECT (unreachable on censored networks).
+func (m *Manager) Set(proxyPort int, userConfiguredExcludedHosts []string, shouldProxy ShouldProxyFunc, chainActive bool) error {
 	if shouldProxy == nil {
 		return fmt.Errorf("shouldProxy is nil")
 	}
 
-	pac := renderPac(proxyPort, userConfiguredExcludedHosts)
+	pac := renderPac(proxyPort, userConfiguredExcludedHosts, chainActive)
 
 	actualPort, err := m.makeServer(pac, shouldProxy)
 	if err != nil {

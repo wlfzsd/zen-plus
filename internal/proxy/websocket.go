@@ -12,12 +12,16 @@ import (
 )
 
 func (p *Proxy) proxyWebsocketTLS(w http.ResponseWriter, req *http.Request) {
+	if p.upstreamChain != nil {
+		hijackAndTunnelWebsocket(w, req, p.chainTLSDial(req.Context()))
+		return
+	}
 	dialer := &tls.Dialer{NetDialer: p.netDialer, Config: &tls.Config{MinVersion: tls.VersionTLS12}}
 	hijackAndTunnelWebsocket(w, req, dialer.Dial)
 }
 
 func (p *Proxy) proxyWebsocket(w http.ResponseWriter, req *http.Request) {
-	hijackAndTunnelWebsocket(w, req, p.netDialer.Dial)
+	hijackAndTunnelWebsocket(w, req, p.tunnelDial())
 }
 
 func hijackAndTunnelWebsocket(w http.ResponseWriter, req *http.Request, dial func(network, addr string) (net.Conn, error)) {

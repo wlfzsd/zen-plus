@@ -243,7 +243,7 @@ func (a *App) StartProxy() (err error) {
 	}
 
 	a.systemProxyManager.SetPACPort(a.config.GetPACPort())
-	if err := a.systemProxyManager.Set(port, a.config.GetIgnoredHosts(), routingPolicy.ShouldProxy); err != nil {
+	if err := a.systemProxyManager.Set(port, a.config.GetIgnoredHosts(), routingPolicy.ShouldProxy, proxy.UpstreamConfigured()); err != nil {
 		if errors.Is(err, sysproxy.ErrUnsupportedDesktopEnvironment) {
 			a.frontendEvents.OnUnsupportedDE(err)
 		} else {
