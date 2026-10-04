@@ -23,6 +23,13 @@ type certLRUCache struct {
 	list *list.List
 	// cache is the map of host to certificate.
 	cache map[string]cacheEntry
+	// done exits the cleanup goroutine on Stop. The generator is created per
+	// proxy start; without an exit path the ticker goroutine pinned every
+	// retired cache - and its last day of certificates - forever
+	// (2026-10-04 toggle-leak fix).
+	done chan struct{}
+	// stopOnce guards Stop against double close.
+	stopOnce sync.Once
 }
 
 // newCertLRUCache initializes a certificate LRU cache with given parameters.
@@ -31,25 +38,38 @@ func newCertLRUCache(maxSize int, cleanupInterval time.Duration) *certLRUCache {
 		cache:   make(map[string]cacheEntry),
 		list:    list.New(),
 		maxSize: maxSize,
+		done:    make(chan struct{}),
 	}
 
 	go func() {
 		// Periodically remove expired entries.
-		// Warning: this function never exits.
 		ticker := time.NewTicker(cleanupInterval)
-		for range ticker.C {
-			c.Lock()
-			for e, entry := range c.cache {
-				if time.Now().Unix() > entry.expiresAt {
-					c.list.Remove(entry.listElement)
-					delete(c.cache, e)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.done:
+				return
+			case <-ticker.C:
+				c.Lock()
+				for e, entry := range c.cache {
+					if time.Now().Unix() > entry.expiresAt {
+						c.list.Remove(entry.listElement)
+						delete(c.cache, e)
+					}
 				}
+				c.Unlock()
 			}
-			c.Unlock()
 		}
 	}()
 
 	return &c
+}
+
+// Stop exits the cleanup goroutine. Safe to call more than once.
+func (c *certLRUCache) Stop() {
+	c.stopOnce.Do(func() {
+		close(c.done)
+	})
 }
 
 // Get returns the certificate for the given host, or nil if it is not cached.

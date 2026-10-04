@@ -14,6 +14,7 @@ import (
 	"net/textproto"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/irbis-sh/zen-desktop/internal/process"
@@ -63,6 +64,17 @@ type Proxy struct {
 	transparentHosts      []string
 	transparentHostsSet   map[string]struct{}
 	transparentHostsMu    sync.RWMutex
+
+	// stopped flips before the proxy starts tearing itself down, so a
+	// connection hijacked mid-handshake does not begin serving past Stop.
+	stopped atomic.Bool
+	// innerServers tracks the per-connection http.Servers created by
+	// proxyConnect (one per MITM'd CONNECT). Each of their handlers closes
+	// over the Proxy - and through it the whole filter with the rule trees -
+	// so they must be reaped on Stop or the retired filter stays reachable
+	// for as long as any tunnel survives (2026-10-04 toggle-leak fix).
+	innerServersMu sync.Mutex
+	innerServers   map[*http.Server]struct{}
 }
 
 // NewProxy creates a proxy. localHost and localHandler, when set, name a host
@@ -89,6 +101,8 @@ func NewProxy(filter filter, certGenerator certGenerator, port int, shouldProxy 
 		localHandler:  localHandler,
 
 		transparentHostsSet: make(map[string]struct{}),
+
+		innerServers: make(map[*http.Server]struct{}),
 	}
 
 	p.netDialer = &net.Dialer{
@@ -148,19 +162,68 @@ func (p *Proxy) Start() (int, error) {
 
 // Stop stops the proxy.
 func (p *Proxy) Stop() error {
+	// Flip first: a connection hijacked mid-handshake must not begin serving
+	// its inner server after the reap below has already run.
+	p.stopped.Store(true)
+
 	err := p.shutdownServer()
+
+	// Reap the per-connection inner servers (2026-10-04, toggle-leak fix):
+	// Shutdown only closes inbound connections and deliberately ignores
+	// hijacked ones - and every MITM'd CONNECT is hijacked, with its inner
+	// Serve loop pinning the handler closure and, through the Proxy, the whole
+	// retired filter (rule trees). Left alone, a filter-list toggle kept the
+	// previous generation's filter alive for as long as any tunnel survived -
+	// memory doubled on every disable/enable. Clients reconnect through the
+	// fresh proxy immediately, so force-closing the tunnels is correct here.
+	p.closeInnerServers()
 
 	// Shutdown only closes inbound connections, and runs first so that requests still in
 	// flight cannot return an upstream connection to the pool after it has been drained.
 	// Left alone, those connections and their read and write goroutines outlive the proxy
 	// until idleConnTimeout.
 	p.requestClient.CloseIdleConnections()
+	// The chained mimic transport is not behind requestClient; its idle pool
+	// must be drained explicitly.
+	if t, ok := p.requestTransport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
+	if t, ok := p.requestTransportHTTPS.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
 
 	if err != nil {
 		return fmt.Errorf("shut down server: %v", err)
 	}
 
 	return nil
+}
+
+// trackInnerServer registers a per-connection server for reaping on Stop.
+func (p *Proxy) trackInnerServer(srv *http.Server) {
+	p.innerServersMu.Lock()
+	defer p.innerServersMu.Unlock()
+	p.innerServers[srv] = struct{}{}
+}
+
+// untrackInnerServer removes a per-connection server once its Serve loop ended.
+func (p *Proxy) untrackInnerServer(srv *http.Server) {
+	p.innerServersMu.Lock()
+	defer p.innerServersMu.Unlock()
+	delete(p.innerServers, srv)
+}
+
+// closeInnerServers force-closes every per-connection server still tracked.
+func (p *Proxy) closeInnerServers() {
+	p.innerServersMu.Lock()
+	servers := make([]*http.Server, 0, len(p.innerServers))
+	for srv := range p.innerServers {
+		servers = append(servers, srv)
+	}
+	p.innerServersMu.Unlock()
+	for _, srv := range servers {
+		_ = srv.Close()
+	}
 }
 
 func (p *Proxy) shutdownServer() error {
@@ -399,6 +462,16 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 			}
 		},
 		ReadHeaderTimeout: 20 * time.Second,
+	}
+
+	// Track for the Stop reap (2026-10-04): http.Server.Shutdown ignores
+	// hijacked connections, so without this every open tunnel pinned the
+	// handler closure - and through it the whole retired filter - past Stop.
+	p.trackInnerServer(srv)
+	defer p.untrackInnerServer(srv)
+	if p.stopped.Load() {
+		ln.Close()
+		return
 	}
 
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {

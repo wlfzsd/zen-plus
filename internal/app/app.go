@@ -62,6 +62,11 @@ type App struct {
 	systrayMgr      *systray.Manager
 	filterListStore *filterliststore.FilterListStore
 	whitelistSrv    *whitelistserver.Server
+	// certGenerator is the generator backing the running proxy. Created per
+	// StartProxy and stopped on StopProxy / aborting starts: each generator
+	// owns a cleanup goroutine, so a retired one must be stopped or it pins
+	// its certificate cache forever (2026-10-04 toggle-leak fix).
+	certGenerator *certgen.CertGenerator
 }
 
 // NewApp initializes the app.
@@ -206,6 +211,14 @@ func (a *App) StartProxy() (err error) {
 	if err != nil {
 		return fmt.Errorf("create cert manager: %v", err)
 	}
+	// On any failed exit path below the generator must be stopped: it owns a
+	// background cleanup goroutine (2026-10-04 toggle-leak fix).
+	defer func() {
+		if err != nil {
+			certGenerator.Stop()
+		}
+	}()
+	a.certGenerator = certGenerator
 
 	filter, whitelistSrv, assetInjector, err := a.buildFilter()
 	if err != nil {
@@ -314,6 +327,11 @@ func (a *App) StopProxy() (err error) {
 	a.whitelistSrv = nil
 	a.proxy = nil
 	a.proxyOn = false
+
+	if a.certGenerator != nil {
+		a.certGenerator.Stop()
+		a.certGenerator = nil
+	}
 
 	a.systrayMgr.OnProxyStopped()
 

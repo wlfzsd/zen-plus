@@ -43,3 +43,11 @@ func NewCertGenerator(certStore certStore, orgName string) (*CertGenerator, erro
 		orgName: orgName,
 	}, nil
 }
+
+// Stop releases the generator's background resources: the per-start cleanup
+// goroutine of the certificate cache (2026-10-04 toggle-leak fix). The caller
+// must Stop every generator it created - the app stops the active generator
+// when the proxy stops and aborting starts.
+func (g *CertGenerator) Stop() {
+	g.cache.Stop()
+}

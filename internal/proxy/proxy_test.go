@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -611,5 +612,87 @@ func TestAddTransparentHostDeduplicates(t *testing.T) {
 	}
 	if !p.shouldMITM("other.example") {
 		t.Fatal("other.example is unaffected, should still be MITM'd")
+	}
+}
+
+// TestStopReapsHijackedConnectTunnel pins the toggle-leak fix (2026-10-04):
+// every MITM'd CONNECT runs its own inner http.Server whose handler closes
+// over the Proxy - and through it the whole filter with the rule trees.
+// http.Server.Shutdown deliberately ignores hijacked connections, so without
+// an explicit reap, Stop left the retired filter reachable for as long as any
+// tunnel survived - toggling the proxy (or a filter list) doubled memory.
+// Stop must tear the tunnel down: the in-flight response must never reach the
+// client, and the inner server must deregister.
+func TestStopReapsHijackedConnectTunnel(t *testing.T) {
+	inFlight := make(chan struct{})
+	var releaseOnce sync.Once
+	release := make(chan struct{})
+	tlsTarget := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inFlight)
+		<-release
+		io.WriteString(w, "late response")
+	}))
+	defer tlsTarget.Close()
+	defer releaseOnce.Do(func() { close(release) })
+
+	var p *Proxy
+	addr := startTestProxy(t, func(px *Proxy) {
+		p = px
+		p.certGenerator = selfSignedCertGenerator{}
+		transportOf(t, px).TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- the MITM certificate is self-signed on purpose; trust is not under test.
+	})
+
+	target := fmt.Sprintf("localhost:%d", portOf(t, tlsTarget))
+	conn, _, resp := connectThrough(t, addr, target)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true, // #nosec G402 -- the MITM certificate is self-signed on purpose; trust is not under test.
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://localhost/", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if err := req.Write(tlsConn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the target")
+	}
+
+	// Stop while the request sits in flight behind the hijacked connection.
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	// The tunnel must be gone: the held response must never reach the client.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	if n, err := tlsConn.Read(buf); err == nil {
+		t.Fatalf("tunnel survived proxy.Stop: client read %q", buf[:n])
+	}
+
+	// The inner server must deregister once its Serve loop ends.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.innerServersMu.Lock()
+		tracked := len(p.innerServers)
+		p.innerServersMu.Unlock()
+		if tracked == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("inner server still tracked %d after Stop", tracked)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
