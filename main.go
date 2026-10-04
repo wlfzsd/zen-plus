@@ -30,25 +30,32 @@ const (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// Memory bounds (2026-10-03): stock Zen runs on Go's default GOGC=100, which
-// lets the heap grow to twice the live set before collecting and hands freed
-// memory back to the OS only lazily. As a system-wide proxy serving every
-// application's traffic around the clock, allocation bursts from request
-// filtering ratchet the resident set up to multi-GiB peaks that never come
-// back down (upstream issue #388 proposed SetGCPercent(5), never merged).
-// These bounds keep the heap target close to the live set while leaving
-// headroom so the soft limit never becomes what drives collection:
-//   - GCPercent 40: collect after each ~40% of heap growth (target = live
-//     set × 1.4 instead of × 2); the GC is concurrent, and the extra cycles
-//     are cheap for an I/O-bound proxy;
-//   - MemoryLimit 1.5 GiB: a soft ceiling far above the actual live set
+// Memory bounds (2026-10-03, retuned 2026-10-04): stock Zen runs on Go's
+// default GOGC=100, which lets the heap grow to twice the live set before
+// collecting and hands freed memory back to the OS only lazily. As a
+// system-wide proxy serving every application's traffic around the clock,
+// allocation bursts from request filtering ratchet the resident set up to
+// multi-GiB peaks that never come back down (upstream issue #388 proposed
+// SetGCPercent(5), never merged). These bounds keep the heap target close to
+// the live set while leaving headroom so the soft limit never becomes what
+// drives collection:
+//   - GCPercent 10: collect after each ~10% of heap growth (target = live
+//     set × 1.1 instead of × 2.0). Measured on this machine (2026-10-03/04,
+//     26h of hourly samples): with GCPercent 40 the overnight idle plateau
+//     sat at 532-536 MiB; the math puts live at ~380 MiB, so 10 keeps the
+//     envelope within ~1.1× of it. The GC is concurrent and the workload is
+//     I/O-bound; upstream PR #388 ran GCPercent 5 in real use without
+//     noticeable cost.
+//   - MemoryLimit 1 GiB: a soft ceiling far above the actual live set
 //     (rule trees, certificate cache, connection pools) that only engages
 //     during extreme bursts, bounding the worst case.
+//   - FreeOSMemory every 10 min: idle periods return memory to the OS within
+//     minutes instead of half-hour strides.
 func configureMemoryBounds() {
 	const (
-		gcPercent             = 40
-		memoryLimitMiB        = 1536
-		memoryReleaseInterval = 30 * time.Minute
+		gcPercent             = 10
+		memoryLimitMiB        = 1024
+		memoryReleaseInterval = 10 * time.Minute
 	)
 
 	debug.SetGCPercent(gcPercent)
