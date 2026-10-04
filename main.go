@@ -30,22 +30,22 @@ const (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// Memory bounds (2026-10-03, retuned 2026-10-04): stock Zen runs on Go's
-// default GOGC=100, which lets the heap grow to twice the live set before
-// collecting and hands freed memory back to the OS only lazily. As a
+// Memory bounds (2026-10-03, retuned 2026-10-04 twice): stock Zen runs on
+// Go's default GOGC=100, which lets the heap grow to twice the live set
+// before collecting and hands freed memory back to the OS only lazily. As a
 // system-wide proxy serving every application's traffic around the clock,
 // allocation bursts from request filtering ratchet the resident set up to
 // multi-GiB peaks that never come back down (upstream issue #388 proposed
 // SetGCPercent(5), never merged). These bounds keep the heap target close to
 // the live set while leaving headroom so the soft limit never becomes what
 // drives collection:
-//   - GCPercent 10: collect after each ~10% of heap growth (target = live
-//     set × 1.1 instead of × 2.0). Measured on this machine (2026-10-03/04,
-//     26h of hourly samples): with GCPercent 40 the overnight idle plateau
-//     sat at 532-536 MiB; the math puts live at ~380 MiB, so 10 keeps the
-//     envelope within ~1.1× of it. The GC is concurrent and the workload is
-//     I/O-bound; upstream PR #388 ran GCPercent 5 in real use without
-//     noticeable cost.
+//   - GCPercent 40: collect after each ~40% of heap growth (target = live
+//     set × 1.4). A GODEBUG=gctrace experiment (2026-10-04) measured GC CPU
+//     at 7% of machine capacity under synthetic browser-like churn at
+//     GCPercent 10 versus 2% at 40 - the tighter value burned multiple cores
+//     under real browsing (user-observed 20-40% CPU) for ~80 MiB of envelope,
+//     so it was rolled back. The GC is concurrent and the workload is
+//     I/O-bound; memory stays bounded by the limit below.
 //   - MemoryLimit 1 GiB: a soft ceiling far above the actual live set
 //     (rule trees, certificate cache, connection pools) that only engages
 //     during extreme bursts, bounding the worst case.
@@ -53,7 +53,7 @@ var assets embed.FS
 //     minutes instead of half-hour strides.
 func configureMemoryBounds() {
 	const (
-		gcPercent             = 10
+		gcPercent             = 40
 		memoryLimitMiB        = 1024
 		memoryReleaseInterval = 10 * time.Minute
 	)
