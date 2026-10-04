@@ -696,3 +696,67 @@ func TestStopReapsHijackedConnectTunnel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestStopReapsTransparentTunnel pins the second half of the toggle-leak fix
+// (2026-10-04): CONNECT to an IP-literal host takes the transparent tunnel
+// path, whose blocked caller frames hold the Proxy - the inner-server reap
+// does not touch these, so without closing the tunnel sockets the retired
+// filter stayed reachable past Stop (user-verified: memory still doubled
+// after the first fix). Stop must tear the tunnel down.
+func TestStopReapsTransparentTunnel(t *testing.T) {
+	inFlight := make(chan struct{})
+	var releaseOnce sync.Once
+	release := make(chan struct{})
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inFlight)
+		<-release
+		io.WriteString(w, "late response")
+	}))
+	defer target.Close()
+	defer releaseOnce.Do(func() { close(release) })
+
+	var p *Proxy
+	addr := startTestProxy(t, func(px *Proxy) { p = px })
+
+	tunnelAddr := fmt.Sprintf("127.0.0.1:%d", portOf(t, target))
+	conn, _, resp := connectThrough(t, addr, tunnelAddr)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatalf("write tunnelled request: %v", err)
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the target")
+	}
+
+	// Stop while the request sits in flight inside the transparent tunnel.
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	// The tunnel must be gone: the held response must never reach the client.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	if n, err := conn.Read(buf); err == nil {
+		t.Fatalf("transparent tunnel survived proxy.Stop: client read %q", buf[:n])
+	}
+
+	// The tunnel must deregister once both directions finished.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.tunnelsMu.Lock()
+		tracked := len(p.tunnels)
+		p.tunnelsMu.Unlock()
+		if tracked == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel still tracked %d after Stop", tracked)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

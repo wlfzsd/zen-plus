@@ -75,6 +75,19 @@ type Proxy struct {
 	// for as long as any tunnel survives (2026-10-04 toggle-leak fix).
 	innerServersMu sync.Mutex
 	innerServers   map[*http.Server]struct{}
+	// tunnels tracks every live bidirectional tunnel (transparent CONNECT,
+	// websockets). Their goroutines block for the tunnel's lifetime and the
+	// frames above them hold the Proxy - so Stop must close the sockets or
+	// the retired filter stays reachable even after the inner servers are
+	// reaped (2026-10-04 toggle-leak fix, part 2).
+	tunnelsMu sync.Mutex
+	tunnels   map[*tunnelPair]struct{}
+}
+
+// tunnelPair holds both ends of a proxied tunnel for Stop-time reaping.
+type tunnelPair struct {
+	client net.Conn
+	remote net.Conn
 }
 
 // NewProxy creates a proxy. localHost and localHandler, when set, name a host
@@ -103,6 +116,7 @@ func NewProxy(filter filter, certGenerator certGenerator, port int, shouldProxy 
 		transparentHostsSet: make(map[string]struct{}),
 
 		innerServers: make(map[*http.Server]struct{}),
+		tunnels:      make(map[*tunnelPair]struct{}),
 	}
 
 	p.netDialer = &net.Dialer{
@@ -177,6 +191,11 @@ func (p *Proxy) Stop() error {
 	// memory doubled on every disable/enable. Clients reconnect through the
 	// fresh proxy immediately, so force-closing the tunnels is correct here.
 	p.closeInnerServers()
+	// The bidirectional tunnels (transparent CONNECT, websockets) are the
+	// second retention path: their blocked caller frames hold the Proxy, and
+	// Shutdown ignores their hijacked connections just the same. Close both
+	// ends of every live tunnel so all frames unwind (2026-10-04, part 2).
+	p.closeTunnels()
 
 	// Shutdown only closes inbound connections, and runs first so that requests still in
 	// flight cannot return an upstream connection to the pool after it has been drained.
@@ -223,6 +242,35 @@ func (p *Proxy) closeInnerServers() {
 	p.innerServersMu.Unlock()
 	for _, srv := range servers {
 		_ = srv.Close()
+	}
+}
+
+// trackTunnel registers a live tunnel for reaping on Stop.
+func (p *Proxy) trackTunnel(tp *tunnelPair) {
+	p.tunnelsMu.Lock()
+	defer p.tunnelsMu.Unlock()
+	p.tunnels[tp] = struct{}{}
+}
+
+// untrackTunnel removes a tunnel once both of its directions finished.
+func (p *Proxy) untrackTunnel(tp *tunnelPair) {
+	p.tunnelsMu.Lock()
+	defer p.tunnelsMu.Unlock()
+	delete(p.tunnels, tp)
+}
+
+// closeTunnels force-closes both ends of every tracked tunnel, so their
+// blocked caller frames (which hold the Proxy) unwind during Stop.
+func (p *Proxy) closeTunnels() {
+	p.tunnelsMu.Lock()
+	pairs := make([]*tunnelPair, 0, len(p.tunnels))
+	for tp := range p.tunnels {
+		pairs = append(pairs, tp)
+	}
+	p.tunnelsMu.Unlock()
+	for _, tp := range pairs {
+		_ = tp.client.Close()
+		_ = tp.remote.Close()
 	}
 }
 
@@ -638,10 +686,21 @@ func (p *Proxy) tunnel(w net.Conn, r *http.Request) {
 	}
 	defer remoteConn.Close()
 
+	// A dial that lands after Stop began must not open a tunnel past it.
+	if p.stopped.Load() {
+		return
+	}
+
 	if _, err := w.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
 		log.Printf("writing 200 OK to client(%s): %v", redacted.Redacted(r.Host), err)
 		return
 	}
+
+	// Track for the Stop reap (2026-10-04): the blocked caller frames of this
+	// tunnel hold the Proxy, and Shutdown ignores hijacked connections.
+	tp := &tunnelPair{client: w, remote: remoteConn}
+	p.trackTunnel(tp)
+	defer p.untrackTunnel(tp)
 
 	linkBidirectionalTunnel(w, remoteConn)
 }
