@@ -24,6 +24,12 @@
 4. **内存结构瘦身**（`internal/networkrules/rule`、`internal/ruletree`）：规则对象 4 个切片头 → 2 个惰性指针，树节点 96B → 64B；
 5. **低分配遍历**：树遍历共享累加器、去重 map 与结果切片池化，每请求分配从 1175 次降至 225 次。
 
+### 相比上游的修复与增强 / Fixes & enhancements beyond upstream
+
+- **修复：过滤开关反复切换导致内存大幅增长**（上游 bug）。上游在禁用/启用规则拦截时，内层连接服务器、退休的证书生成器与双向隧道不被回收，内存逐次翻倍；zen-plus 在 Stop 路径全部收割（提交 `81efce0`、`fb7e6a7`），并为传输空闲池设上限、空闲内存定期归还 OS。
+- **新增：上游代理链**（当前支持 HTTP 上游）。`upstream-proxy.txt` 一行配置即可让全部代理流量再经上游转发，用于叠加自有网络出口；镜像架构：拨号失败按新规格重拨镜像重试，**无任何静默降级路径**。
+- **新增：TLS 指纹镜像**（`internal/proxy/uptls.go`）。MITM 后重新出站的 TLS 连接**原样转发浏览器自己的 ClientHello**（uTLS `RawClientHello`）：Chrome 出去就是 Chrome 指纹、Firefox 就是 Firefox——不指定、不伪造任何档案。实测同一请求经 Zen 与直连**出口 JA3 逐字节一致**，规避"代理 TLS 指纹错配"类网站封控。已知边界：出站统一 HTTP/1.1、后量子密钥交换组被裁、HTTP header 顺序未做原始重放（详见使用文档）。
+
 ### 实测效果 / Measured results（真实订阅语料 61.1 万条规则，多轮中位数）
 
 | 指标 Metric | 上游基线 Upstream | zen-plus | 变化 Δ |
@@ -80,6 +86,12 @@ Both rounds are hard-constrained by **zero semantic change** — every step was 
 3. **Per-request caches**: referer hostname, effective TLD+1, and the user-navigation guard are computed once per request instead of once per candidate rule;
 4. **Memory layout slimming** (`internal/networkrules/rule`, `internal/ruletree`): rule structs went from 4 slice headers to 2 lazy pointers; tree nodes from 96B to 64B;
 5. **Low-allocation traversal**: shared traversal accumulator plus pooled dedup maps and result slices — per-request allocations dropped from 1,175 to 225.
+
+### Fixes & enhancements beyond upstream
+
+- **Fixed: large memory growth when toggling ad-blocking on/off** (upstream bug). Upstream leaks per-connection servers, retired certificate generators and bidirectional tunnels across filter toggles; zen-plus reaps all of them on Stop (commits `81efce0`, `fb7e6a7`), caps transport idle pools and returns idle memory to the OS periodically.
+- **Added: upstream proxy chain** (HTTP upstreams for now). A single line in `upstream-proxy.txt` routes all proxied traffic through an upstream of your choice; mirror architecture retries dialing with a fresh spec — **no silent fallback path**.
+- **Added: TLS fingerprint mirroring** (`internal/proxy/uptls.go`). Re-emitted TLS connections after MITM forward the browser's **own ClientHello byte-for-byte** (uTLS `RawClientHello`): Chrome goes out as Chrome, Firefox as Firefox — no profile is invented or selected. Verified: JA3 through Zen is **identical, byte-for-byte, to a direct connection**, defusing the "proxy TLS fingerprint mismatch" class of site blocks. Known limits: HTTP/1.1 egress, post-quantum key-share groups dropped, HTTP header order not replayed.
 
 ### Measured results (real-subscription corpus, 611,652 rules, medians)
 
