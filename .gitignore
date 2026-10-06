@@ -13,3 +13,14 @@ frontend/package.json.md5
 .idea
 **/*.pprof
 **/*.out
+
+# zen-plus: copyrighted page snapshots used only by local ad-test data
+# generation (regenerate via tmp_enginebench/gen_adtest_urls.py, see
+# tmp_enginebench/README.md) — not redistributable, excluded from the repo
+tmp_enginebench/adblock_data.json
+tmp_enginebench/d3host_raw.txt
+tmp_enginebench/d3ward_page.html
+tmp_enginebench/d3ward_new.html
+tmp_enginebench/adguard_page.html
+tmp_enginebench/cybi.html
+tmp_enginebench/cybi_extreme.html

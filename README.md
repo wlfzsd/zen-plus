@@ -1,152 +1,109 @@
 <div align="center">
 
-<p>
-  <picture>
-    <img src="https://github.com/irbis-sh/zen-desktop/blob/master/assets/appicon.png?raw=true" alt="Zen's Blue Shield Logo" width="150" />
-  </picture>
-</p>
+# zen-plus
 
-<h3>
-  Zen: Your Comprehensive Ad-Blocker and Privacy Guard
-</h3>
-
-<blockquote>
-There is, simply, no way, to ignore privacy. Because a citizenry’s freedoms are interdependent, to surrender your own privacy is really to surrender everyone’s.
-
-Edward Snowden, Permanent Record
-</blockquote>
-
-![GitHub License](https://img.shields.io/github/license/irbis-sh/zen-desktop)
-![GitHub release](https://img.shields.io/github/v/release/irbis-sh/zen-desktop)
-![GitHub download counter](https://img.shields.io/github/downloads/irbis-sh/zen-desktop/total)
-
-[**Website**](https://irbis.sh/zen) • [**Mastodon**](https://mastodon.social/@irbis_sh) • [**Bluesky**](https://bsky.app/profile/irbis.sh) • [**Discord**](https://discord.gg/zGeQVatAUm) • [**Documentation**](https://docs.irbis.sh/docs/zen/)
+**中文** | [English](#english)
 
 </div>
 
-Zen is an open-source system-wide ad-blocker and privacy guard for Windows, macOS, and Linux. It works by setting up a proxy that intercepts HTTP requests from all applications, and blocks those serving ads, tracking scripts that monitor your behavior, malware, and other unwanted content. By operating at the system level, Zen can protect against threats that browser extensions cannot, such as trackers embedded in desktop applications and operating system components. Zen comes with many pre-installed filters, but also allows you to easily add hosts files and EasyList-style filters, enabling you to tailor your protection to your specific needs.
+---
 
-## Downloads
+## 中文
 
-During the first run, Zen will prompt you to install a root certificate. This is required for Zen to be able to intercept and modify HTTPS requests. This certificate is generated locally and never leaves your device. For details on how this works and the steps we take to secure it, see our [security architecture](/docs/internal/security-architecture.md).
+**zen-plus 是 [Zen](https://github.com/irbis-sh/zen-desktop) 的增强分支**：一款开源的系统级广告拦截与隐私防护应用。zen-plus 在上游基础上，对**过滤规则匹配引擎**做了两轮深度性能优化——拦截能力与规则兼容性与上游完全一致，而引擎执行效率与内存占用大幅下降。
 
-### Windows
+> 上游归属：本项目基于 [irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop)（MIT License，Copyright (c) 2026 Irbis & Zen contributors）。全部上游提交历史完整保留在 `master` 分支，本地增强在 `upstream-chain` 分支。所有修改以 MIT 协议回馈社区。
 
-- x64: [💾 Installer](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen-amd64-installer.exe) | [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_windows_amd64.zip)
-- ARM64: [💾 Installer](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen-arm64-installer.exe) | [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_windows_arm64.zip)
+### 引擎优化了什么 / What was optimized
 
-Unsure which version to download? Click on 'Start' and type 'View processor info'. The 'System type' field under 'Device specifications' will tell you which one you need.
+两轮优化均以"**语义零变化**"为硬约束——每一步都有与改前引擎的逐请求对拍（黄金回放 3.6 万×2 全一致、1 万真实 URL 等价 0 差异、20 万随机 URL 模糊 0 差异、32 线程并发压力 0 差异）：
 
-#### Winget
+1. **正则形状特化**（`internal/networkrules/fastshape.go`）：对 `^https?://…` 等常见正则形状在解析期生成精确等价的快速匹配器，未识别形状回落原 regexp 引擎；
+2. **最稀 token 反向索引**（`internal/networkrules/tokenindex.go`，借鉴 Ghostery adblocker 技巧）：对回落的正则按"必需字面量"建索引，URL 不含 token 的正则直接跳过（零漏报证明见 `docs/benchmarks/probe-report.md`）；
+3. **请求级缓存**：Referer 主机名、有效 TLD+1、用户导航守卫等每请求只算一次；
+4. **内存结构瘦身**（`internal/networkrules/rule`、`internal/ruletree`）：规则对象 4 个切片头 → 2 个惰性指针，树节点 96B → 64B；
+5. **低分配遍历**：树遍历共享累加器、去重 map 与结果切片池化，每请求分配从 1175 次降至 225 次。
 
-Zen is available via [Winget (Windows Package Manager)](https://github.com/microsoft/winget-pkgs/tree/master/manifests/z/ZenPrivacy). To install, run:
+### 实测效果 / Measured results（真实订阅语料 61.1 万条规则，多轮中位数）
 
-```bash
-winget install ZenPrivacy.ZenDesktop
-```
+| 指标 Metric | 上游基线 Upstream | zen-plus | 变化 Δ |
+|---|---|---|---|
+| 引擎匹配耗时 Matching time / request | 370,336 ns | **145,651 ns** | **-60.7%** |
+| 每请求堆分配 Allocations / request | 1,175 次 / 132 KB | **225 次 / 8.7 KB** | **-80.9% / -93.4%** |
+| 引擎 live 内存 Engine live memory | 494 B/规则 rule | **388 B/规则** | **-21.5%** |
+| 过滤列表装载 List loading | 560 ms | 521 ms | -6.9% |
+| 拦截有效性（d3ward 测试页得分） | 96.2% | **96.2%** | 完全一致 identical |
 
-### macOS
+完整数据、测试方法与复现步骤见 [docs/benchmarks/](docs/benchmarks/)（中英对照汇总：[benchmark-summary.md](docs/benchmarks/benchmark-summary.md)）。
 
-- x64 (Intel): [💾 Installer](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen-amd64.dmg) | [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_darwin_amd64.tar.gz)
-- ARM64 (Apple Silicon): [💾 Installer](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen-arm64.dmg) | [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_darwin_arm64.tar.gz)
+### 安装 / Install
 
-Unsure which version to download? Learn at [Apple's website](https://support.apple.com/en-us/HT211814).
+从 [Releases](https://github.com/wlfzsd/zen-plus/releases) 下载 `Zen.exe`（附 SHA256 校验值；可执行文件未做代码签名，SmartScreen 提示属正常）。覆盖安装到 `%LOCALAPPDATA%\Programs\Zen\` 后启动即可，配置与过滤器缓存沿用原版。
 
-#### 🍺 Homebrew
-
-Zen is available via [Homebrew](https://formulae.brew.sh/cask/zen-privacy) for both Intel and Apple Silicon. To install it, run:
-
-```bash
-brew install --cask zen-privacy
-```
-
-### Linux
-
-Zen has an install script that covers most Linux distributions. To install, run:
+### 本地构建 / Build from source
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/irbis-sh/zen-desktop/master/install.sh | sh
+# 需要 Go 1.27+ 与 Node.js 24+
+wails build -o Zen.exe -platform windows/amd64 -tags prod
+# 产物：build/bin/Zen.exe
 ```
 
-To uninstall, run:
+### 验证装置 / Verification harness
+
+`tmp_enginebench/` 是全部性能与正确性结论的复现装置（冻结基线对拍、黄金回放、并发压力、广告测试页数据集、真实订阅语料装载器），用法见 [tmp_enginebench/README.md](tmp_enginebench/README.md)。
+
+### License
+
+MIT（保留上游 [LICENSE](LICENSE)）。上游项目与团队：[irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop) • [irbis.sh](https://irbis.sh/zen)。
+
+---
+
+<a id="english"></a>
+
+## English
+
+**zen-plus is an enhanced fork of [Zen](https://github.com/irbis-sh/zen-desktop)**, an open-source system-wide ad-blocker and privacy guard. On top of upstream, zen-plus ships two rounds of deep performance optimizations to the **filter-rule matching engine** — blocking behavior and rule compatibility are bit-for-bit identical to upstream, while engine CPU time and memory drop substantially.
+
+> Attribution: based on [irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop) (MIT License, Copyright (c) 2026 Irbis & Zen contributors). The complete upstream commit history is preserved on the `master` branch; local enhancements live on `upstream-chain`.
+
+### What was optimized
+
+Both rounds are hard-constrained by **zero semantic change** — every step was verified against the pre-optimization engine request-by-request (golden replay: 36,231×2 exact matches; 10k real-URL equivalence: 0 diffs; 200k random-URL fuzz: 0 diffs; 32-thread stress: 0 diffs):
+
+1. **Regexp shape specialization** (`internal/networkrules/fastshape.go`): common shapes like `^https?://…` are compiled at parse time into exact-equivalent fast matchers; unrecognized shapes fall back to `regexp.Regexp`;
+2. **Rarest-token reverse index** (`internal/networkrules/tokenindex.go`, technique credited to the Ghostery adblocker): fallback regexps are indexed by their provably-required literals; a URL missing the token skips the regexp entirely (zero false negatives — proof in `docs/benchmarks/probe-report.md`);
+3. **Per-request caches**: referer hostname, effective TLD+1, and the user-navigation guard are computed once per request instead of once per candidate rule;
+4. **Memory layout slimming** (`internal/networkrules/rule`, `internal/ruletree`): rule structs went from 4 slice headers to 2 lazy pointers; tree nodes from 96B to 64B;
+5. **Low-allocation traversal**: shared traversal accumulator plus pooled dedup maps and result slices — per-request allocations dropped from 1,175 to 225.
+
+### Measured results (real-subscription corpus, 611,652 rules, medians)
+
+| Metric | Upstream baseline | zen-plus | Δ |
+|---|---|---|---|
+| Engine matching time / request | 370,336 ns | **145,651 ns** | **-60.7%** |
+| Heap allocations / request | 1,175 / 132 KB | **225 / 8.7 KB** | **-80.9% / -93.4%** |
+| Engine live memory | 494 B/rule | **388 B/rule** | **-21.5%** |
+| Filter-list loading | 560 ms | 521 ms | -6.9% |
+| Blocking effectiveness (d3ward test page) | 96.2% | **96.2%** | identical |
+
+Full data, methodology and reproduction steps: [docs/benchmarks/](docs/benchmarks/) (bilingual summary: [benchmark-summary.md](docs/benchmarks/benchmark-summary.md)).
+
+### Install
+
+Grab `Zen.exe` from [Releases](https://github.com/wlfzsd/zen-plus/releases) (SHA256 attached; binaries are unsigned, so SmartScreen may warn). Replace `%LOCALAPPDATA%\Programs\Zen\Zen.exe` and start — configuration and filter caches are shared with upstream builds.
+
+### Build from source
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/irbis-sh/zen-desktop/master/install.sh | sh -s -- --uninstall
+# Requires Go 1.27+ and Node.js 24+
+wails build -o Zen.exe -platform windows/amd64 -tags prod
+# Output: build/bin/Zen.exe
 ```
 
-Other installation methods:
+### Verification harness
 
-- AUR: [👾 zen-adblocker-bin](https://aur.archlinux.org/packages/zen-adblocker-bin)
-- x64: [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_linux_amd64.tar.gz)
-- ARM64: [📦 Portable](https://github.com/irbis-sh/zen-desktop/releases/latest/download/Zen_linux_arm64.tar.gz)
+`tmp_enginebench/` reproduces every performance and correctness claim (frozen-baseline A/B, golden replay, concurrency stress, ad-test-page datasets, real-subscription corpus loader) — see [tmp_enginebench/README.md](tmp_enginebench/README.md).
 
-On Linux, automatic proxy configuration is currently only supported on GNOME- and KDE-based desktop environments.
+### License
 
-## Screenshots
-
-<table>
-  <thead>
-    <tr>
-        <th>Request history</th>
-        <th>Filter list manager</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>
-        Request history shows all requests blocked by Zen. Each request can be inspected to see which filter and rule blocked it.
-      </td>
-      <td>
-        Zen comes with many pre-installed filters. You can also add your own by providing a URL to a hosts file or an EasyList-style filter.
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="top">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/main-dark.png">
-          <source media="(prefers-color-scheme: light)" srcset="assets/screenshots/main-light.png">
-          <img alt="Screenshot of Zen's Home screen showing blocked network requests. One entry details a blocked request to a Marketo tracking script from politico.com, with several other advertising and analytics domains listed below. Navigation tabs and a Donate button appear at the top, and a blue Stop button is visible at the bottom." src="assets/screenshots/main-light.png">
-        </picture>
-      </td>
-      <td align="center" valign="top">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/regional-dark.png">
-          <source media="(prefers-color-scheme: light)" srcset="assets/screenshots/regional-light.png">
-          <img alt="Screenshot of Zen's Filter lists screen showing a regional category with multiple ad-block filter lists from different countries. Each list includes a name, a source URL, and toggle switches indicating whether it is enabled." src="assets/screenshots/regional-light.png">
-        </picture>
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-## Development
-
-Follow the [getting started guide](docs/internal/index.md#getting-started) to begin working on Zen development. If you have any questions, feel free to ask in the [Discussions](https://github.com/irbis-sh/zen-desktop/discussions/categories/q-a).
-
-## Contributing
-
-Zen needs your help! You can report bugs, suggest and implement features, improve the codebase, or help translate Zen into your language. Please refer to the [Contributing Guidelines](CONTRIBUTING.md) for more information.
-
-## Special Thanks
-
-Zen exists thanks to the support of many incredible people and organizations, including:
-
-- Our contributors
-  <a href="https://github.com/irbis-sh/zen-desktop/graphs/contributors">
-  <img src="https://opencollective.com/zen-privacy/contributors.svg?width=890&button=false" alt="Avatars of all GitHub contributors to Zen" />
-  </a>
-
-- Our sponsors
-  <a href="https://opencollective.com/zen-privacy#backers" target="_blank" rel="noreferrer noopener">
-  <img src="https://opencollective.com/zen-privacy/backers.svg?width=890&button=false" alt="Avatars of all backers of Zen on Open Collective" />
-  </a>
-
-- [SignPath](https://signpath.io) and [SignPath Foundation](https://signpath.org/), who generously provide a free Windows certificate and code signing
-
-  <a href="https://signpath.io" target="_blank" rel="noreferrer noopener">
-  <img src="./assets/signpath-logo.png" width="260" />
-  </a>
-
-## License
-
-This project is licensed under the [MIT License](https://github.com/irbis-sh/zen-desktop/blob/master/LICENSE). Some code and assets included with Zen are licensed under different terms. For more information, see the [COPYING](https://github.com/irbis-sh/zen-desktop/blob/master/COPYING.md) file.
+MIT (upstream [LICENSE](LICENSE) preserved). Upstream project and team: [irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop) • [irbis.sh](https://irbis.sh/zen).
