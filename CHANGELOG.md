@@ -1,17 +1,40 @@
 # Changelog
 
-## v0.25.1
+## v0.25.1-plus.1
 
-### What's New
+### 中文
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+基于上游 v0.25.1 的 zen-plus 首个发布：过滤规则引擎两轮深度优化，**拦截行为与上游完全一致**。
 
-Thank you for using Zen!
+### 改进
+- 引擎匹配耗时 **-60.7%**（370.3µs → 145.7µs/请求，真实订阅 61.1 万规则语料）
+- 每请求堆分配 **-93.4%**（1175 次/132KB → 225 次/8.7KB）
+- 引擎 live 内存 **-21.5%**（494 → 388 B/规则）
+- 拦截有效性不变：d3ward 测试页 96.2% 分数持平；黄金回放 36,231×2 全一致；1 万真实 URL 与 20 万模糊 URL 等价 0 差异
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+### 手段
+正则形状特化、最稀 token 反向索引（Ghostery 技巧）、请求级缓存、规则/树节点结构瘦身、池化低分配遍历。详见 [docs/benchmarks](https://github.com/wlfzsd/zen-plus/tree/upstream-chain/docs/benchmarks)。
+
+### 安装
+下载 Zen.exe 覆盖 `%LOCALAPPDATA%\Programs\Zen\Zen.exe`（配置与过滤器缓存通用）。SHA256 见下方 Assets。
+
+---
+
+### English
+
+First zen-plus release on top of upstream v0.25.1: two rounds of deep filter-engine optimization with **blocking behavior identical to upstream**.
+
+### Improvements
+- Engine matching time **-60.7%** (370.3µs → 145.7µs/request, 611k-rule real-subscription corpus)
+- Per-request heap allocations **-93.4%** (1,175/132KB → 225/8.7KB)
+- Engine live memory **-21.5%** (494 → 388 B/rule)
+- Blocking effectiveness unchanged: d3ward score 96.2%; golden replay 36,231×2 exact; 10k real-URL + 200k fuzz equivalence 0 diffs
+
+### Means
+Regexp shape specialization, rarest-token reverse index (Ghostery technique), per-request caches, slimmed rule/node layouts, pooled low-alloc traversal. See [docs/benchmarks](https://github.com/wlfzsd/zen-plus/tree/upstream-chain/docs/benchmarks).
+
+### Install
+Replace `%LOCALAPPDATA%\Programs\Zen\Zen.exe` (config and filter caches are shared). SHA256 under Assets.
 
 ## v0.25.0
 
