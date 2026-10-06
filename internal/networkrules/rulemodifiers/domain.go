@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -53,16 +54,60 @@ func (m *DomainModifier) Parse(modifier string) error {
 	return nil
 }
 
+// refererHostEntry is one cached url.Parse result. ok=false caches the
+// negative outcome of a failed parse, preserving ShouldMatchReq's semantics
+// of not matching unparseable referers.
+type refererHostEntry struct {
+	host string
+	ok   bool
+}
+
+// refererHostCacheLimit bounds the cache; on overflow the whole map is
+// dropped and rebuilt on demand (2026-10-05).
+const refererHostCacheLimit = 4096
+
+// refererHostCache maps a raw Referer header value to the hostname that
+// url.Parse(referer).Hostname() returns for it. The mapping is a pure
+// function of the string, so entries never go stale and no invalidation is
+// needed.
+var (
+	refererHostCacheMu sync.RWMutex
+	refererHostCache   = make(map[string]refererHostEntry)
+)
+
+// refererHostname returns the hostname of the referer URL. ok is false when
+// url.Parse rejected the string; the caller must then not match.
+func refererHostname(referer string) (host string, ok bool) {
+	refererHostCacheMu.RLock()
+	e, hit := refererHostCache[referer]
+	refererHostCacheMu.RUnlock()
+	if hit {
+		return e.host, e.ok
+	}
+
+	u, err := url.Parse(referer)
+	if err == nil {
+		e = refererHostEntry{host: u.Hostname(), ok: true}
+	}
+	refererHostCacheMu.Lock()
+	if len(refererHostCache) >= refererHostCacheLimit {
+		refererHostCache = make(map[string]refererHostEntry)
+	}
+	refererHostCache[referer] = e
+	refererHostCacheMu.Unlock()
+	return e.host, e.ok
+}
+
 func (m *DomainModifier) ShouldMatchReq(req *http.Request) bool {
 	var hostname string
 	referer := req.Header.Get("Referer")
 	// Allow empty "Referer" header to make inverted rules work.
 	if referer != "" {
-		url, err := url.Parse(referer)
-		if err != nil {
+		host, ok := refererHostname(referer)
+		if !ok {
 			return false
 		}
-		hostname = url.Hostname()
+		hostname = host
 	} else {
 		hostname = req.URL.Hostname()
 	}
@@ -114,13 +159,52 @@ func (m *domainModifierEntry) Parse(entry string) error {
 	return nil
 }
 
+// eTLD1CacheLimit bounds the effective-TLD-plus-one memo; on overflow the
+// whole map is dropped and rebuilt on demand (2026-10-05).
+const eTLD1CacheLimit = 4096
+
+// eTLD1Cache maps a hostname to its effective TLD+1. The mapping is a pure
+// function of the hostname, so entries never go stale; ok=false memoizes the
+// negative outcome of EffectiveTLDPlusOne failing for that host.
+var (
+	eTLD1CacheMu sync.RWMutex
+	eTLD1Cache   = make(map[string]struct {
+		eTLD1 string
+		ok    bool
+	})
+)
+
+func effectiveTLDPlusOneCached(domain string) (string, bool) {
+	eTLD1CacheMu.RLock()
+	e, hit := eTLD1Cache[domain]
+	eTLD1CacheMu.RUnlock()
+	if hit {
+		return e.eTLD1, e.ok
+	}
+
+	eTLD1, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err == nil {
+		e.eTLD1, e.ok = eTLD1, true
+	}
+	eTLD1CacheMu.Lock()
+	if len(eTLD1Cache) >= eTLD1CacheLimit {
+		eTLD1Cache = make(map[string]struct {
+			eTLD1 string
+			ok    bool
+		})
+	}
+	eTLD1Cache[domain] = e
+	eTLD1CacheMu.Unlock()
+	return e.eTLD1, e.ok
+}
+
 func (m *domainModifierEntry) MatchDomain(domain string) bool {
 	switch {
 	case m.regular != "":
 		return m.regular == domain || strings.HasSuffix(domain, "."+m.regular)
 	case m.tld != "":
-		eTLD1, err := publicsuffix.EffectiveTLDPlusOne(domain)
-		if err != nil {
+		eTLD1, ok := effectiveTLDPlusOneCached(domain)
+		if !ok {
 			return false
 		}
 

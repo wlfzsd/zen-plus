@@ -24,16 +24,22 @@ func New() *NetworkRules {
 func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, shouldBlock bool, redirectURL string) {
 	reqURL := renderURLWithoutPort(req.URL)
 
+	// The user-navigation guard is a per-request property (upstream #257
+	// semantics); hoist the two header reads out of the per-rule evaluation.
+	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
+
 	primaryRules := nr.primaryStore.Get(reqURL)
-	primaryRules = filter(primaryRules, func(r *rule.Rule) bool {
-		return r.ShouldMatchReq(req)
+	defer nr.primaryStore.putRes(primaryRules)
+	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
+		return r.ShouldMatchReqNav(req, isUserNav)
 	})
 	if len(primaryRules) == 0 {
 		return nil, false, ""
 	}
 
 	exceptions := nr.exceptionStore.Get(reqURL)
-	exceptions = filter(exceptions, func(er *exceptionrule.ExceptionRule) bool {
+	defer nr.exceptionStore.putRes(exceptions)
+	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
 		return er.ShouldMatchReq(req)
 	})
 
@@ -87,7 +93,8 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	url := renderURLWithoutPort(req.URL)
 
 	primaryRules := nr.primaryStore.Get(url)
-	primaryRules = filter(primaryRules, func(r *rule.Rule) bool {
+	defer nr.primaryStore.putRes(primaryRules)
+	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
 		return r.ShouldMatchRes(res)
 	})
 	if len(primaryRules) == 0 {
@@ -95,7 +102,8 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	}
 
 	exceptions := nr.exceptionStore.Get(url)
-	exceptions = filter(exceptions, func(er *exceptionrule.ExceptionRule) bool {
+	defer nr.exceptionStore.putRes(exceptions)
+	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
 		return er.ShouldMatchRes(res)
 	})
 
@@ -125,16 +133,18 @@ func (nr *NetworkRules) Compact() {
 	nr.exceptionStore.Compact()
 }
 
-// filter returns a new slice containing only the elements of arr
-// that satisfy the predicate.
-func filter[T any](arr []T, predicate func(T) bool) []T {
-	var res []T
+// filterInPlace compacts arr in place, keeping only the elements that
+// satisfy the predicate, and returns the shortened slice (same backing).
+// The caller must not retain elements beyond the returned length. Used with
+// ruleStore.Get results whose backing is pool-recycled via putRes (2026-10-06).
+func filterInPlace[T any](arr []T, predicate func(T) bool) []T {
+	out := arr[:0]
 	for _, el := range arr {
 		if predicate(el) {
-			res = append(res, el)
+			out = append(out, el)
 		}
 	}
-	return res
+	return out
 }
 
 func renderURLWithoutPort(u *url.URL) string {

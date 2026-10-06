@@ -284,16 +284,16 @@ func assertRuleBuckets(t *testing.T, r *Rule, wantImportant, wantDocument bool, 
 	if r.Document != wantDocument {
 		t.Errorf("Document = %v, want %v", r.Document, wantDocument)
 	}
-	if got := typeNames(r.ConditionModifiers.And); !reflect.DeepEqual(got, wantAnd) {
+	if got := typeNames(r.AndConditionModifiers()); !reflect.DeepEqual(got, wantAnd) {
 		t.Errorf("AND modifiers = %#v, want %#v", got, wantAnd)
 	}
-	if got := typeNames(r.ConditionModifiers.Or); !reflect.DeepEqual(got, wantOr) {
+	if got := typeNames(r.OrConditionModifiers()); !reflect.DeepEqual(got, wantOr) {
 		t.Errorf("OR modifiers = %#v, want %#v", got, wantOr)
 	}
-	if got := typeNames(r.QueryModifiers); !reflect.DeepEqual(got, wantQuery) {
+	if got := typeNames(r.QueryModifiers()); !reflect.DeepEqual(got, wantQuery) {
 		t.Errorf("query modifiers = %#v, want %#v", got, wantQuery)
 	}
-	if got := typeNames(r.ActionModifiers); !reflect.DeepEqual(got, wantActions) {
+	if got := typeNames(r.ActionModifiers()); !reflect.DeepEqual(got, wantActions) {
 		t.Errorf("action modifiers = %#v, want %#v", got, wantActions)
 	}
 }

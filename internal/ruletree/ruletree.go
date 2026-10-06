@@ -22,6 +22,12 @@ type Tree[T Data] struct {
 	domainBoundaryRoot *node[T]
 	// anchorRoot stores pattern beginning with tokenAnchor (|).
 	anchorRoot *node[T]
+
+	// lpOnce lazily initializes the GetLP pools (2026-10-06): generic New
+	// closures cannot be static package variables.
+	lpOnce  sync.Once
+	accPool sync.Pool
+	mapPool sync.Pool
 }
 
 func New[T Data]() *Tree[T] {
@@ -76,39 +82,48 @@ func (t *Tree[T]) Insert(pattern string, v T) {
 
 		if n == nil {
 			n := &node[T]{
-				prefix: tokens,
-				leaf:   []T{v},
+				prefixBase: prefixBaseOf(tokens),
+				prefixLen:  len(tokens),
+				leaf:       []T{v},
 			}
 			parent.addEdge(tokens[0], n)
 			return
 		}
 
-		commonPrefix := longestPrefix(tokens, n.prefix)
-		if commonPrefix == len(n.prefix) {
+		commonPrefix := longestPrefix(tokens, n.prefixSlice())
+		if commonPrefix == n.prefixLen {
 			tokens = tokens[commonPrefix:]
 			continue
 		}
 
 		child := &node[T]{
-			prefix: tokens[:commonPrefix],
+			prefixBase: prefixBaseOf(tokens[:commonPrefix]),
+			prefixLen:  commonPrefix,
 		}
 		parent.updateEdge(tokens[0], child)
 
-		child.addEdge(n.prefix[commonPrefix], n)
-		n.prefix = n.prefix[commonPrefix:]
+		child.addEdge(n.prefixSlice()[commonPrefix], n)
+		n.advancePrefix(commonPrefix)
 
 		l := []T{v}
 		if commonPrefix == len(tokens) {
 			child.leaf = l
 		} else {
 			n := &node[T]{
-				leaf:   l,
-				prefix: tokens[commonPrefix:],
+				leaf:       l,
+				prefixBase: prefixBaseOf(tokens[commonPrefix:]),
+				prefixLen:  len(tokens) - commonPrefix,
 			}
 			child.addEdge(tokens[commonPrefix], n)
 		}
 		return
 	}
+}
+
+// advancePrefix drops the first n tokens from the node's prefix.
+func (n *node[T]) advancePrefix(k int) {
+	n.prefixBase = prefixBaseOf(n.prefixSlice()[k:])
+	n.prefixLen -= k
 }
 
 // Get retrieves data matching the given URL.
@@ -162,6 +177,74 @@ func (t *Tree[T]) Get(url string) []T {
 		result[i] = d
 		i++
 	}
+	return result
+}
+
+// GetLP is the low-allocation variant of Get (2026-10-06): identical result
+// SET (dedup makes order map-random in both), with
+//   - one shared accumulator for the whole traversal (node.visit), and
+//   - the accumulator and the dedup map served from per-tree sync.Pools.
+//
+// The returned slice is freshly allocated, exactly like Get. GetLP may run
+// concurrently with itself and with Get; the same Insert/Compact exclusion
+// as Get applies.
+func (t *Tree[T]) GetLP(url string) []T {
+	t.lpOnce.Do(func() {
+		t.accPool.New = func() any { return new([]T) }
+		t.mapPool.New = func() any { return make(map[T]struct{}, 64) }
+	})
+
+	accp := t.accPool.Get().(*[]T)
+	acc := (*accp)[:0]
+
+	tr := traverser[T]{data: acc}
+	tr.visit(t.anchorRoot, url)
+	tr.visit(t.root, url)
+
+	var (
+		traverseNext = false
+
+		schemeEnd = strings.Index(url, "://")
+		hostStart = schemeEnd + 3
+		hostEnd   = strings.IndexAny(url[hostStart:], "/?")
+	)
+	for i := 1; i < len(url); i++ {
+		c := url[i]
+
+		if traverseNext {
+			tr.visit(t.root, url[i:])
+			traverseNext = isTraversalMarker(c)
+		} else if isTraversalMarker(c) {
+			tr.visit(t.root, url[i:])
+			traverseNext = true
+		}
+
+		if i == hostStart {
+			tr.visit(t.domainBoundaryRoot, url[i:])
+		}
+		if i > hostStart && (hostEnd == -1 || i < hostStart+hostEnd) {
+			if c == '.' {
+				tr.visit(t.domainBoundaryRoot, url[i+1:])
+			}
+		}
+	}
+
+	acc = tr.data
+
+	m := t.mapPool.Get().(map[T]struct{})
+	clear(m)
+	for _, item := range acc {
+		m[item] = struct{}{}
+	}
+	result := make([]T, len(m))
+	var i int
+	for d := range m {
+		result[i] = d
+		i++
+	}
+	*accp = acc[:0]
+	t.accPool.Put(accp)
+	t.mapPool.Put(m)
 	return result
 }
 

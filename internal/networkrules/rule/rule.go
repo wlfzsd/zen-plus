@@ -13,15 +13,23 @@ import (
 )
 
 // Rule represents modifiers of a rule.
+//
+// 2026-10-05: the four modifier slices were folded into two lazily
+// allocated groups (ruleCondMods/ruleActMods) so that rules without
+// modifiers (the majority) keep this struct small.
 type Rule struct {
 	// string representation
 	RawRule string
 	// FilterName is the name of the filter that the rule belongs to.
 	FilterName *string
 
-	ConditionModifiers conditionModifiers
-	ActionModifiers    []rulemodifiers.ActionModifier
-	QueryModifiers     []rulemodifiers.QueryModifier
+	// condMods holds the rule's condition modifiers. It is nil for rules
+	// without any condition modifier and allocated on first use by
+	// ParseModifiers.
+	condMods *ruleCondMods
+	// actMods holds the rule's action and query modifiers, allocated
+	// lazily the same way.
+	actMods *ruleActMods
 
 	// Document shows if rule has Document modifier.
 	Document bool
@@ -36,11 +44,68 @@ type Rule struct {
 // TODO: The split between And and Or modifiers is somewhat convoluted and exists only to support ContentType.
 // Remove it by grouping multiple ContentTypes into a single modifier and evaluating all modifiers with AND logic.
 
-type conditionModifiers struct {
-	// And are modifiers that must all match for the rule to apply.
-	And []rulemodifiers.ConditionModifier
-	// Or are modifiers where at least one must match for the rule to apply.
-	Or []rulemodifiers.ConditionModifier
+// ruleCondMods groups the condition modifiers of a rule. It only exists for
+// rules that actually carry condition modifiers; see Rule.condMods.
+type ruleCondMods struct {
+	// and are modifiers that must all match for the rule to apply.
+	and []rulemodifiers.ConditionModifier
+	// or are modifiers where at least one must match for the rule to apply.
+	or []rulemodifiers.ConditionModifier
+}
+
+// ruleActMods groups the action and query modifiers of a rule. It only
+// exists for rules that actually carry them; see Rule.actMods.
+type ruleActMods struct {
+	action []rulemodifiers.ActionModifier
+	query  []rulemodifiers.QueryModifier
+}
+
+// ensureCondMods lazily allocates Rule.condMods.
+func (rm *Rule) ensureCondMods() *ruleCondMods {
+	if rm.condMods == nil {
+		rm.condMods = &ruleCondMods{}
+	}
+	return rm.condMods
+}
+
+// ensureActMods lazily allocates Rule.actMods.
+func (rm *Rule) ensureActMods() *ruleActMods {
+	if rm.actMods == nil {
+		rm.actMods = &ruleActMods{}
+	}
+	return rm.actMods
+}
+
+// AndConditionModifiers returns the modifiers that must all match for the rule to apply.
+func (rm *Rule) AndConditionModifiers() []rulemodifiers.ConditionModifier {
+	if rm.condMods == nil {
+		return nil
+	}
+	return rm.condMods.and
+}
+
+// OrConditionModifiers returns the modifiers where at least one must match for the rule to apply.
+func (rm *Rule) OrConditionModifiers() []rulemodifiers.ConditionModifier {
+	if rm.condMods == nil {
+		return nil
+	}
+	return rm.condMods.or
+}
+
+// ActionModifiers returns the rule's action modifiers.
+func (rm *Rule) ActionModifiers() []rulemodifiers.ActionModifier {
+	if rm.actMods == nil {
+		return nil
+	}
+	return rm.actMods.action
+}
+
+// QueryModifiers returns the rule's query modifiers.
+func (rm *Rule) QueryModifiers() []rulemodifiers.QueryModifier {
+	if rm.actMods == nil {
+		return nil
+	}
+	return rm.actMods.query
 }
 
 func (rm *Rule) ParseModifiers(modifiers []string) error {
@@ -57,7 +122,7 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 		name, hasValue := cutModifierName(m)
 
 		var modifier rulemodifiers.Modifier
-		var isOr bool // true if the modifier belongs to ConditionModifiers.Or.
+		var isOr bool // true if the modifier belongs to ruleCondMods.or.
 
 		if !hasValue {
 			// Flag modifiers.
@@ -123,15 +188,18 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 
 		switch typed := modifier.(type) {
 		case rulemodifiers.ConditionModifier:
+			mods := rm.ensureCondMods()
 			if isOr {
-				rm.ConditionModifiers.Or = append(rm.ConditionModifiers.Or, typed)
+				mods.or = append(mods.or, typed)
 			} else {
-				rm.ConditionModifiers.And = append(rm.ConditionModifiers.And, typed)
+				mods.and = append(mods.and, typed)
 			}
 		case rulemodifiers.ActionModifier:
-			rm.ActionModifiers = append(rm.ActionModifiers, typed)
+			mods := rm.ensureActMods()
+			mods.action = append(mods.action, typed)
 		case rulemodifiers.QueryModifier:
-			rm.QueryModifiers = append(rm.QueryModifiers, typed)
+			mods := rm.ensureActMods()
+			mods.query = append(mods.query, typed)
 		default:
 			log.Fatalf("got unknown modifier type %T for modifier %s", modifier, m)
 		}
@@ -160,7 +228,15 @@ func cutModifierName(modifier string) (name string, hasValue bool) {
 
 // ShouldMatchReq returns true if the rule should match the request.
 func (rm *Rule) ShouldMatchReq(req *http.Request) bool {
-	if req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document" && !rm.Document && !rm.All {
+	return rm.ShouldMatchReqNav(req, req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document")
+}
+
+// ShouldMatchReqNav is ShouldMatchReq with the user-navigation guard
+// (Sec-Fetch-User=?1 + Sec-Fetch-Dest=document, upstream #257 semantics)
+// precomputed by the caller, so evaluating many candidate rules against one
+// request does not repeat the two header reads per rule.
+func (rm *Rule) ShouldMatchReqNav(req *http.Request, isUserNav bool) bool {
+	if isUserNav && !rm.Document && !rm.All {
 		return false
 	}
 
@@ -170,15 +246,15 @@ func (rm *Rule) ShouldMatchReq(req *http.Request) bool {
 // ModifiersMatchReq returns true if the rule's matching modifiers match the request.
 func (rm *Rule) ModifiersMatchReq(req *http.Request) bool {
 	// AndModifiers: All must match.
-	for _, m := range rm.ConditionModifiers.And {
+	for _, m := range rm.AndConditionModifiers() {
 		if !m.ShouldMatchReq(req) {
 			return false
 		}
 	}
 
 	// OrModifiers: At least one must match.
-	if len(rm.ConditionModifiers.Or) > 0 {
-		for _, m := range rm.ConditionModifiers.Or {
+	if or := rm.OrConditionModifiers(); len(or) > 0 {
+		for _, m := range or {
 			if m.ShouldMatchReq(req) {
 				return true
 			}
@@ -196,14 +272,14 @@ func (rm *Rule) ShouldMatchRes(res *http.Response) bool {
 
 // ModifiersMatchRes returns true if the rule's matching modifiers match the response.
 func (rm *Rule) ModifiersMatchRes(res *http.Response) bool {
-	for _, m := range rm.ConditionModifiers.And {
+	for _, m := range rm.AndConditionModifiers() {
 		if !m.ShouldMatchRes(res) {
 			return false
 		}
 	}
 
-	if len(rm.ConditionModifiers.Or) > 0 {
-		for _, m := range rm.ConditionModifiers.Or {
+	if or := rm.OrConditionModifiers(); len(or) > 0 {
+		for _, m := range or {
 			if m.ShouldMatchRes(res) {
 				return true
 			}
@@ -216,12 +292,12 @@ func (rm *Rule) ModifiersMatchRes(res *http.Response) bool {
 
 // ShouldBlockReq returns true if the request should be blocked.
 func (rm *Rule) ShouldBlockReq(*http.Request) bool {
-	return len(rm.ActionModifiers) == 0 && len(rm.QueryModifiers) == 0
+	return len(rm.ActionModifiers()) == 0 && len(rm.QueryModifiers()) == 0
 }
 
 // ModifyReq modifies a request. Returns true if the request was modified.
 func (rm *Rule) ModifyReq(req *http.Request) (modified bool) {
-	for _, modifier := range rm.ActionModifiers {
+	for _, modifier := range rm.ActionModifiers() {
 		if modifier.ModifyReq(req) {
 			modified = true
 		}
@@ -232,7 +308,7 @@ func (rm *Rule) ModifyReq(req *http.Request) (modified bool) {
 
 // ModifyReqQuery modifies a request query. Returns true if the query was modified.
 func (rm *Rule) ModifyReqQuery(query url.Values) (modified bool) {
-	for _, qm := range rm.QueryModifiers {
+	for _, qm := range rm.QueryModifiers() {
 		if qm.ModifyQuery(query) {
 			modified = true
 		}
@@ -243,7 +319,7 @@ func (rm *Rule) ModifyReqQuery(query url.Values) (modified bool) {
 
 // ModifyRes modifies a response. Returns true if the response was modified.
 func (rm *Rule) ModifyRes(res *http.Response) (modified bool, err error) {
-	for _, modifier := range rm.ActionModifiers {
+	for _, modifier := range rm.ActionModifiers() {
 		m, err := modifier.ModifyRes(res)
 		if err != nil {
 			return false, fmt.Errorf("modify response: %w", err)
