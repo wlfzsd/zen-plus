@@ -40,6 +40,11 @@
 
 从 [Releases](https://github.com/wlfzsd/zen-plus/releases) 下载 `Zen.exe`（附 SHA256 校验值；可执行文件未做代码签名，SmartScreen 提示属正常）。覆盖安装到 `%LOCALAPPDATA%\Programs\Zen\` 后启动即可，配置与过滤器缓存沿用原版。
 
+### 版本策略 / Versioning
+
+zen-plus 使用自己的版本线（当前 **3.0.0**，起点基于上游 v0.25.1）；每次合并上游后递增 3.x，对应的上游基线写进 Release 说明。exe 内的版本号由构建时的 git tag 自动注入。
+zen-plus keeps its own version line (currently **3.0.0**, starting point based on upstream v0.25.1); each upstream merge bumps 3.x, and the upstream base is stated in every release's notes. The binary version string is injected from the git tag at build time.
+
 ### 本地构建 / Build from source
 
 ```bash
