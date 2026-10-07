@@ -16,10 +16,13 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.0
+	github.com/bogdanfinn/fhttp v0.6.9
+	github.com/bogdanfinn/utls v1.7.8-barnius
 	github.com/getlantern/elevate v0.0.0-20220903142053-479ab992b264
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/hectane/go-acl v0.0.0-20230122075934-ca0b05cb1adb
 	github.com/klauspost/compress v1.18.0
+	github.com/refraction-networking/utls v1.6.7
 	github.com/spyzhov/ajson v0.9.6
 	github.com/tdewolff/parse/v2 v2.8.4
 	golang.org/x/net v0.56.0
@@ -56,7 +59,6 @@ require (
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/refraction-networking/utls v1.6.7 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect

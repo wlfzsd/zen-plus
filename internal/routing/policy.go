@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/irbis-sh/zen-desktop/internal/config"
 )
@@ -93,10 +94,29 @@ func (p *Policy) matches(path string) bool {
 	return false
 }
 
+// normalisePath memoizes the filesystem-resolving normalization: the caller
+// feeds it process paths, which repeat at near-100% rates, while EvalSymlinks
+// costs a filesystem syscall every call (2026-10-07 efficiency audit).
+// Entries are bounded; symlink targets changing at runtime is not a real
+// scenario for process paths, and a full reset on overflow keeps the bound.
+var (
+	normPathMu    sync.RWMutex
+	normPathCache = make(map[string]string)
+)
+
+const normPathCacheCap = 4096
+
 func normalisePath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
+	}
+
+	normPathMu.RLock()
+	cached, ok := normPathCache[path]
+	normPathMu.RUnlock()
+	if ok {
+		return cached
 	}
 
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
@@ -110,5 +130,12 @@ func normalisePath(path string) string {
 		// Filepaths are case-insensitive on Windows and macOS.
 		path = strings.ToLower(path)
 	}
+
+	normPathMu.Lock()
+	if len(normPathCache) >= normPathCacheCap {
+		normPathCache = make(map[string]string, normPathCacheCap)
+	}
+	normPathCache[path] = path
+	normPathMu.Unlock()
 	return path
 }

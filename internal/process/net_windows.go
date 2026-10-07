@@ -14,7 +14,9 @@ func findPIDByIP(srcPort, dstPort uint16, srcIP, dstIP net.IP) (PID, error) {
 		return 0, ErrNotFound
 	}
 
-	pid, err := findPidByPort(srcPort)
+	// 2026-10-07 效率审计：四元组缓存命中即免全表枚举（TIME_WAIT 保证键的
+	// 生命周期内 PID 不变）。
+	pid, err := cachedPIDByIP(srcPort, dstPort, srcIP, dstIP)
 	if err != nil {
 		return 0, err
 	}

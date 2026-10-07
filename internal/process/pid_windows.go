@@ -14,7 +14,8 @@ func pidExecutablePath(pid PID) (string, error) {
 	if pid < 0 || pid > math.MaxUint32 {
 		return "", fmt.Errorf("pid out of range for uint32")
 	}
-	return getProcPath(uint32(pid))
+	// 2026-10-07 效率审计：(pid, 启动时间) 缓存命中即免 5 次 syscall 的路径查询。
+	return cachedProcPath(uint32(pid))
 }
 
 func pidName(pid PID, executablePath string) (string, error) {
@@ -27,9 +28,10 @@ func pidName(pid PID, executablePath string) (string, error) {
 		}
 	}
 
-	name, err := getFileDescription(path)
-	if err == nil && name != "" {
-		return name, nil
+	// 2026-10-07 效率审计：版本资源读取按路径缓存（此前每个过滤事件都读一次
+	// exe 的 PE 版本资源，ad-heavy 页面可每秒几十次磁盘 I/O）。
+	if desc, ok := cachedFileDescription(path); ok && desc != "" {
+		return desc, nil
 	}
 	return filepath.Base(path), nil
 }

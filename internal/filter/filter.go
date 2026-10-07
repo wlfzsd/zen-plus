@@ -366,11 +366,14 @@ func (f *Filter) markSeen(rule string) bool {
 // HandleRequest handles the given request by matching it against the filter rules.
 // If the request should be blocked, it returns a response that blocks the request. If the request should be modified, it modifies it in-place.
 func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*http.Response, error) {
-	initialURL := req.URL.String()
+	// initialURL 只在过滤事件分支需要；事件是少数路径，通用请求不为它付
+	// URL.String() 的分配（2026-10-07 效率审计）。ModifyReq 不替换 req.URL
+	// 指针（全仓无 req.URL= 赋值），指针先行捕获即可保住"事件前"的语义。
+	initialURL := req.URL
 
 	appliedRules, shouldBlock, redirectURL := f.networkRules.ModifyReq(req)
 	if shouldBlock {
-		f.actionObserver.OnFilterBlock(req.Method, initialURL, req.Header.Get("Referer"), appliedRules, processInfo)
+		f.actionObserver.OnFilterBlock(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
 
 		if fetchmeta.IsUserNavigation(req) {
 			port := f.whitelistSrv.GetPort()
@@ -389,12 +392,12 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 	}
 
 	if redirectURL != "" {
-		f.actionObserver.OnFilterRedirect(req.Method, initialURL, redirectURL, req.Header.Get("Referer"), appliedRules, processInfo)
+		f.actionObserver.OnFilterRedirect(req.Method, initialURL.String(), redirectURL, req.Header.Get("Referer"), appliedRules, processInfo)
 		return f.networkRules.CreateRedirectResponse(req, redirectURL), nil
 	}
 
 	if len(appliedRules) > 0 {
-		f.actionObserver.OnFilterModify(req.Method, initialURL, req.Header.Get("Referer"), appliedRules, processInfo)
+		f.actionObserver.OnFilterModify(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
 	}
 
 	return nil, nil

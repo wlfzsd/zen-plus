@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 
 	utls "github.com/refraction-networking/utls"
 
@@ -113,23 +114,23 @@ func (c *peekedConn) Read(p []byte) (int, error) {
 // extractMimicSpec turns the captured record into a mirrored ClientHelloSpec.
 // Unknown extensions are passed through (AllowBluntMimicry) so nothing the
 // client sent is dropped, except session credentials that cannot survive a
-// MITM relay (see dropInvalidCredentials). A failure yields nil, and the
-// upstream handshake falls back to stock Go TLS rather than to any invented
-// fingerprint.
-func extractMimicSpec(raw []byte) *utls.ClientHelloSpec {
+// MITM relay (see dropInvalidCredentials) and the ALPN alignment below. A
+// failure yields nil, and the upstream handshake falls back to refusing the
+// dial rather than to any invented fingerprint.
+func extractMimicSpec(raw []byte, inboundH2 bool) *utls.ClientHelloSpec {
 	if len(raw) == 0 {
 		return nil
 	}
 	f := utls.Fingerprinter{AllowBluntMimicry: true}
 	spec, err := f.RawClientHello(raw)
 	if err != nil {
-		log.Printf("mimic: extracting ClientHello spec: %v; falling back to Go TLS", err)
+		log.Printf("mimic: extracting ClientHello spec: %v; falling back", err)
 		return nil
 	}
-	trimSpecALPN(spec)
+	alignSpecALPN(spec, inboundH2)
 	dropInvalidCredentials(spec)
 	if !sanitizeSpecForGo(spec) {
-		log.Printf("mimic: mirrored hello unusable by the Go TLS stack; falling back to Go TLS")
+		log.Printf("mimic: mirrored hello unusable by the Go TLS stack; refusing to dial")
 		return nil
 	}
 	return spec
@@ -151,7 +152,8 @@ func extractMimicSpec(raw []byte) *utls.ClientHelloSpec {
 // verbatim.
 func dropInvalidCredentials(spec *utls.ClientHelloSpec) {
 	const (
-		extECH = 0xfe0d
+		extECH  = 0xfe0d
+		extALPS = 0x44cd // application_settings (RFC 8879 / ALPS)
 	)
 	kept := make([]utls.TLSExtension, 0, len(spec.Extensions))
 	for _, ext := range spec.Extensions {
@@ -161,6 +163,17 @@ func dropInvalidCredentials(spec *utls.ClientHelloSpec) {
 			continue
 		case *utls.GenericExtension:
 			if e.Id == extECH {
+				continue
+			}
+			if e.Id == extALPS {
+				// 2026-10-07 深挖实锤：ALPS 声明"客户端栈会处理服务器 Encrypted-
+				// Extensions 里的应用设置子消息并按其调整 h2 行为"。中转栈
+				// （utls+x/net 或 fhttp2）不履行该声明：重放 0x44CD 后 google
+				// 系前端（BoringSSL）按 ALPS 分支走 TLS 状态机，与我们错位，
+				// 回 unexpected_message（对端 alert 10）——h2 会话建立即被拒。
+				// 逐扩展二分实锤：仅剥 0x44CD，youtube 全域 h2 会话 200；
+				// 其余指纹（ciphers/组/ALPN/顺序/keyshare/ECH 外的扩展）原样。
+				// 这是对"无法履行的能力声明"的剥除（与 ECH 同型），非针对特定站。
 				continue
 			}
 		}
@@ -219,13 +232,18 @@ func isGREASE(v uint16) bool {
 	return (v & 0x0f0f) == 0x0a0a
 }
 
-// trimSpecALPN shrinks the mirrored ALPN to what this side can actually
-// serve: h2 is disabled on the outbound transport (deliberate - Go's h2
-// carries its own fingerprint class and one dead tunnel would stall every
-// stream). Everything else keeps the client's order verbatim. This is a
-// transport-capability trim, not a fingerprint edit: a hello advertising
+// alignSpecALPN aligns the mirrored ALPN with the inbound connection's
+// negotiated protocol, so the origin sees the same protocol the client used
+// end to end (2026-10-07 h2-mirror). An h2 client keeps its verbatim ALPN -
+// the h2 leg (reoriginate.go) speaks HTTP/2 with the client's own fingerprint
+// parameters. An HTTP/1.1 client keeps only http/1.1, mirroring the protocol
+// it actually used rather than the capabilities it advertised. This is a
+// transport-capability alignment, not a fingerprint edit: a hello advertising
 // only h2 loses its ALPN extension rather than being rewritten.
-func trimSpecALPN(spec *utls.ClientHelloSpec) {
+func alignSpecALPN(spec *utls.ClientHelloSpec, inboundH2 bool) {
+	if inboundH2 {
+		return
+	}
 	for i, ext := range spec.Extensions {
 		alpn, ok := ext.(*utls.ALPNExtension)
 		if !ok {
@@ -291,6 +309,10 @@ func (p *Proxy) dialWithHello(ctx context.Context, network, addr string, stockCf
 		raw.Close()
 		return nil, fmt.Errorf("mimic TLS handshake(%s): %w", redacted.Redacted(hostOf(addr)), err)
 	}
+	// ZEN_DEBUG_MIMIC=1：每个镜像出站连接的协商结果取证（h2 转发保真验证用）
+	if os.Getenv("ZEN_DEBUG_MIMIC") == "1" {
+		log.Printf("mimic: dial %s negotiated %q", hostOf(addr), conn.ConnectionState().NegotiatedProtocol)
+	}
 	return conn, nil
 }
 
@@ -333,13 +355,21 @@ func (p *Proxy) freshSpecFrom(ctx context.Context) *utls.ClientHelloSpec {
 	if !ok || len(raw) == 0 {
 		return nil
 	}
-	return extractMimicSpec(raw)
+	inboundH2 := false
+	if facts := connFactsFromContext(ctx); facts != nil {
+		inboundH2 = facts.inboundH2
+	}
+	return extractMimicSpec(raw, inboundH2)
 }
 
-// newMimicContext attaches the raw captured hello to a request context.
-func newMimicContext(ctx context.Context, helloRaw []byte) context.Context {
-	if len(helloRaw) == 0 {
-		return ctx
+// newMimicContext attaches the raw captured hello and the connection's
+// protocol facts to a request context.
+func newMimicContext(ctx context.Context, helloRaw []byte, facts *connFacts) context.Context {
+	if len(helloRaw) > 0 {
+		ctx = context.WithValue(ctx, mimicHelloKey{}, helloRaw)
 	}
-	return context.WithValue(ctx, mimicHelloKey{}, helloRaw)
+	if facts != nil {
+		ctx = context.WithValue(ctx, connFactsKey{}, facts)
+	}
+	return ctx
 }

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"github.com/irbis-sh/zen-desktop/internal/process"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
 )
@@ -64,6 +66,13 @@ type Proxy struct {
 	transparentHosts      []string
 	transparentHostsSet   map[string]struct{}
 	transparentHostsMu    sync.RWMutex
+	// h2Server serves the inbound MITM leg's HTTP/2 connections (2026-10-07
+	// h2-mirror). Registering TLSNextProto["h2"] on the per-connection inner
+	// server routes h2 conns here instead of net/http's bundled setup, which
+	// is required to tap the plaintext stream: conn.serve type-asserts
+	// *tls.Conn before dispatching, so the tap can only live inside this
+	// callback, wrapped around the conn handed to ServeConn.
+	h2Server http2.Server
 
 	// stopped flips before the proxy starts tearing itself down, so a
 	// connection hijacked mid-handshake does not begin serving past Stop.
@@ -207,8 +216,8 @@ func (p *Proxy) Stop() error {
 	if t, ok := p.requestTransport.(*http.Transport); ok {
 		t.CloseIdleConnections()
 	}
-	if t, ok := p.requestTransportHTTPS.(*http.Transport); ok {
-		t.CloseIdleConnections()
+	if c, ok := p.requestTransportHTTPS.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
 	}
 
 	if err != nil {
@@ -491,15 +500,27 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 
 	ln := newSingleConnListener(tlsConn)
 
-	var handler http.Handler
+	// Protocol-fact capture (2026-10-07 h2-mirror): every MITM'd connection
+	// carries a facts object; HTTP/2 connections additionally get a plaintext
+	// tap inside the h2 dispatch below (an h1 conn cannot be tapped without
+	// breaking net/http's *tls.Conn dispatch, so h1 keeps its pre-mirror
+	// behavior). helloRaw rides on the facts for the per-address outbound
+	// transports.
+	facts := newConnFacts()
+	facts.helloRaw = helloRaw
+
+	var inner http.Handler
 	if isLocal {
 		// The local endpoint is served directly, not round-tripped: its
 		// requests deliberately skip the filter, so no filter-list rule can
 		// block Zen's own assets.
-		handler = p.localHandler
+		inner = p.localHandler
 	} else {
-		handler = p.connectHandler(connReq, host, ln, processInfo, helloRaw)
+		inner = p.connectHandler(connReq, host, ln, processInfo, helloRaw, facts)
 	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		inner.ServeHTTP(w, req.WithContext(withConnFacts(req.Context(), facts)))
+	})
 
 	srv := &http.Server{
 		Handler:   handler,
@@ -510,6 +531,18 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 			}
 		},
 		ReadHeaderTimeout: 20 * time.Second,
+	}
+	// Registering the h2 dispatch takes it over from net/http's bundled
+	// setup (a non-nil TLSNextProto disables that): the tap can only wrap
+	// the conn inside this callback, because conn.serve type-asserts
+	// *tls.Conn before dispatching.
+	srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){
+		"h2": func(s *http.Server, c *tls.Conn, _ http.Handler) {
+			p.h2Server.ServeConn(newTapConn(c, facts), &http2.ServeConnOpts{
+				BaseConfig: s,
+				Handler:    handler,
+			})
+		},
 	}
 
 	// Track for the Stop reap (2026-10-04): http.Server.Shutdown ignores
@@ -528,7 +561,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 }
 
 // connectHandler returns an http.Handler that processes requests on a CONNECT-tunnelled TLS connection.
-func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleConnListener, processInfo process.Info, helloRaw []byte) http.Handler {
+func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleConnListener, processInfo process.Info, helloRaw []byte, facts *connFacts) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Host = connReq.Host
 		req.URL.Scheme = "https"
@@ -601,10 +634,11 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 		}
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
-		// HTTPS over an active upstream chain rides the mimic-TLS transport,
-		// replaying this connection's captured ClientHello; everything else -
+		// HTTPS over an active upstream chain rides the mimic round tripper,
+		// which replays this connection's captured ClientHello and - for h2
+		// clients - the captured h2 fingerprint parameters; everything else -
 		// plain http, and https without a chain - uses the stock transport.
-		req = req.WithContext(newMimicContext(req.Context(), helloRaw))
+		req = req.WithContext(newMimicContext(req.Context(), helloRaw, facts))
 		rt := p.requestTransport
 		if req.URL.Scheme == "https" && p.requestTransportHTTPS != nil {
 			rt = p.requestTransportHTTPS

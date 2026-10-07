@@ -20,8 +20,8 @@ import (
 // terminated while peekClientHello captures the raw record, which is then
 // turned into the mirrored spec exactly like production does. The inbound
 // server's GetConfigForClient records the client's original cipher list for
-// fidelity comparison.
-func captureMirroredSpec(t *testing.T, clientProtos []string) (*utls.ClientHelloSpec, []uint16) {
+// fidelity comparison. inboundH2 stands in for the tap's protocol detection.
+func captureMirroredSpec(t *testing.T, clientProtos []string, inboundH2 bool) (*utls.ClientHelloSpec, []uint16) {
 	t.Helper()
 
 	inner, inbound := net.Pipe()
@@ -61,7 +61,7 @@ func captureMirroredSpec(t *testing.T, clientProtos []string) (*utls.ClientHello
 	if len(rawHello) == 0 {
 		t.Fatal("no ClientHello captured")
 	}
-	spec := extractMimicSpec(rawHello)
+	spec := extractMimicSpec(rawHello, inboundH2)
 	if spec == nil {
 		t.Fatal("extractMimicSpec returned nil for a plain Go hello")
 	}
@@ -134,13 +134,15 @@ func mustCert(t *testing.T) tls.Certificate {
 
 // TestMimicMirrorPreservesClientHello pins the mirror contract end to end:
 // the upstream hello the mirror dials with carries the client's own
-// fingerprint - identical cipher list, in order - with only h2 trimmed from
-// ALPN and unusable groups dropped, so the re-originated connection keeps
-// the client's TLS fingerprint. No canned profile is involved.
+// fingerprint - identical cipher list, in order - with unusable groups
+// dropped, so the re-originated connection keeps the client's TLS
+// fingerprint. No canned profile is involved. ALPN follows the inbound
+// connection's negotiated protocol (2026-10-07 h2-mirror): verbatim for an
+// h2 client, h2-trimmed for an HTTP/1.1 client.
 func TestMimicMirrorPreservesClientHello(t *testing.T) {
 	t.Parallel()
 
-	spec, inboundCiphers := captureMirroredSpec(t, []string{"h2", "http/1.1"})
+	spec, inboundCiphers := captureMirroredSpec(t, []string{"h2", "http/1.1"}, true)
 
 	// Fidelity: the mirrored spec's cipher list equals the inbound
 	// handshake's, in the client's order.
@@ -167,24 +169,37 @@ func TestMimicMirrorPreservesClientHello(t *testing.T) {
 		}
 	}
 
-	// ALPN trim: h2 removed, http/1.1 kept in order.
+	// ALPN kept verbatim: the client negotiated h2 inbound, so the mirror
+	// offers exactly what the client offered, in order.
 	alpnFound := false
 	for _, ext := range spec.Extensions {
 		if a, ok := ext.(*utls.ALPNExtension); ok {
 			alpnFound = true
-			if len(a.AlpnProtocols) != 1 || a.AlpnProtocols[0] != "http/1.1" {
-				t.Fatalf("mirrored ALPN = %v, want [http/1.1]", a.AlpnProtocols)
+			if len(a.AlpnProtocols) != 2 || a.AlpnProtocols[0] != "h2" || a.AlpnProtocols[1] != "http/1.1" {
+				t.Fatalf("mirrored ALPN = %v, want [h2 http/1.1]", a.AlpnProtocols)
 			}
 		}
 	}
 	if !alpnFound {
 		t.Fatal("mirrored spec lost the ALPN extension")
 	}
+
+	// The HTTP/1.1 path: same hello, h1 inbound - h2 must be trimmed so the
+	// re-originated connection speaks the protocol the client actually used.
+	h1Spec, _ := captureMirroredSpec(t, []string{"h2", "http/1.1"}, false)
+	for _, ext := range h1Spec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			if len(a.AlpnProtocols) != 1 || a.AlpnProtocols[0] != "http/1.1" {
+				t.Fatalf("h1-inbound mirrored ALPN = %v, want [http/1.1]", a.AlpnProtocols)
+			}
+		}
+	}
 }
 
 // TestDialUpstreamMimicTLSNoH2 drives the mirror dialer against a h2-capable
-// origin: even though the client offered h2, the outbound handshake must
-// negotiate http/1.1 (the ALPN trim) and complete.
+// origin with NO protocol facts in the context - the HTTP/1.1-inbound
+// semantics: the outbound handshake must negotiate http/1.1 (the ALPN
+// alignment for h1 clients) and complete.
 func TestDialUpstreamMimicTLSNoH2(t *testing.T) {
 	t.Parallel()
 
@@ -205,7 +220,7 @@ func TestDialUpstreamMimicTLSNoH2(t *testing.T) {
 		t.Fatalf("NewProxy: %v", err)
 	}
 
-	ctx := newMimicContext(context.Background(), helloRaw)
+	ctx := newMimicContext(context.Background(), helloRaw, nil)
 	conn, err := p.dialUpstreamMimicTLS(ctx, "tcp", server.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- httptest target, trust is not under test
 	if err != nil {
 		t.Fatalf("dialUpstreamMimicTLS: %v", err)
@@ -220,7 +235,7 @@ func TestDialUpstreamMimicTLSNoH2(t *testing.T) {
 		t.Fatal("handshake not complete")
 	}
 	if got := uc.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
-		t.Fatalf("negotiated protocol = %q, want http/1.1 (h2 must never be negotiated by the mimic path)", got)
+		t.Fatalf("negotiated protocol = %q, want http/1.1 (h1-inbound semantics must not offer h2 outbound)", got)
 	}
 }
 
@@ -246,7 +261,7 @@ func TestMimicFreshSpecPerDial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProxy: %v", err)
 	}
-	ctx := newMimicContext(context.Background(), helloRaw)
+	ctx := newMimicContext(context.Background(), helloRaw, nil)
 	addr := server.Listener.Addr().String()
 	stock := &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- httptest target, trust is not under test
 
@@ -265,7 +280,7 @@ func TestMimicFreshSpecPerDial(t *testing.T) {
 		conn.Close()
 	}
 
-	spec := extractMimicSpec(helloRaw)
+	spec := extractMimicSpec(helloRaw, false)
 	if spec == nil {
 		t.Fatal("spec extraction failed")
 	}
@@ -340,7 +355,7 @@ func TestDialUpstreamMimicTLSRetriesMirrorOnRejection(t *testing.T) {
 		t.Fatalf("NewProxy: %v", err)
 	}
 
-	ctx := newMimicContext(context.Background(), helloRaw)
+	ctx := newMimicContext(context.Background(), helloRaw, nil)
 	conn, derr := p.dialUpstreamMimicTLS(ctx, "tcp", server.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- httptest target, trust is not under test
 	if derr != nil {
 		t.Fatalf("retry after rejection must succeed via the mirror: %v", derr)
@@ -425,7 +440,7 @@ func TestPeekFragmentedClientHello(t *testing.T) {
 		if len(res.raw) == 0 {
 			t.Fatal("no hello bytes reassembled")
 		}
-		if spec := extractMimicSpec(res.raw); spec == nil {
+		if spec := extractMimicSpec(res.raw, false); spec == nil {
 			t.Fatal("fragmented hello did not yield a mirror spec")
 		}
 	case <-time.After(5 * time.Second):
