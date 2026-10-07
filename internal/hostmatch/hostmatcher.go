@@ -45,6 +45,8 @@ func IsGenericPatternSet(hostnamePatterns string) bool {
 type ExclusionMatcher[T any] func(ex, item T) bool
 
 type hostnameStore[T any] interface {
+	// Add stores data for hostnamePattern. The pattern also matches every
+	// subdomain of the hostnames it matches.
 	Add(hostnamePattern string, data T)
 	Get(hostname string) []T
 }
@@ -96,18 +98,11 @@ func (hm *HostMatcher[T]) AddPrimaryRule(hostnamePatterns string, data T) error 
 	}
 	for _, pattern := range patterns {
 		if pattern[0] == '~' {
-			pattern = pattern[1:]
-			hm.exceptionStore.Add(pattern, data)
-			if !strings.HasPrefix(pattern, "*.") {
-				hm.exceptionStore.Add("*."+pattern, data)
-			}
+			hm.exceptionStore.Add(pattern[1:], data)
 			continue
 		}
 
 		hm.primaryStore.Add(pattern, data)
-		if !strings.HasPrefix(pattern, "*.") {
-			hm.primaryStore.Add("*."+pattern, data)
-		}
 	}
 
 	return nil
@@ -128,9 +123,6 @@ func (hm *HostMatcher[T]) AddExceptionRule(hostnamePatterns string, data T) erro
 		}
 
 		hm.exceptionStore.Add(pattern, data)
-		if !strings.HasPrefix(pattern, "*.") {
-			hm.exceptionStore.Add("*."+pattern, data)
-		}
 	}
 
 	return nil
