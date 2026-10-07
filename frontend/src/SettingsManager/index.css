@@ -79,6 +79,36 @@
   grid-column: 2;
 }
 
+.settings-manager__upstream-proxy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.settings-manager__upstream-proxy-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-manager__upstream-proxy-row .bp6-html-select {
+  flex: 0 0 auto;
+}
+
+.settings-manager__upstream-proxy-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-manager__upstream-proxy-port {
+  flex: 0 0 5.5rem;
+}
+
+.settings-manager__upstream-proxy-row .bp6-input-group {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .settings-manager__section-body {
   padding: 10px 10px 0 10px;
 }

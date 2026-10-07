@@ -62,6 +62,10 @@ export function GetUpdatePolicy() {
   return window['go']['config']['Config']['GetUpdatePolicy']();
 }
 
+export function GetUpstreamProxy() {
+  return window['go']['config']['Config']['GetUpstreamProxy']();
+}
+
 export function GetVersion() {
   return window['go']['config']['Config']['GetVersion']();
 }
@@ -104,6 +108,10 @@ export function SetRules(arg1) {
 
 export function SetUpdatePolicy(arg1) {
   return window['go']['config']['Config']['SetUpdatePolicy'](arg1);
+}
+
+export function SetUpstreamProxy(arg1) {
+  return window['go']['config']['Config']['SetUpstreamProxy'](arg1);
 }
 
 export function ToggleFilterList(arg1, arg2) {

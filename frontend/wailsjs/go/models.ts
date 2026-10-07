@@ -45,6 +45,28 @@ export namespace config {
 	        this.appPaths = source["appPaths"];
 	    }
 	}
+	export class UpstreamProxyConfig {
+	    enabled: boolean;
+	    type: string;
+	    host: string;
+	    port: number;
+	    username: string;
+	    password: string;
+
+	    static createFrom(source: any = {}) {
+	        return new UpstreamProxyConfig(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.type = source["type"];
+	        this.host = source["host"];
+	        this.port = source["port"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	    }
+	}
 
 }
 

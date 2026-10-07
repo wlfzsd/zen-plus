@@ -21,6 +21,7 @@ import { PACPortInput } from './PACPortInput';
 import { PortInput } from './PortInput';
 import { ThemeSelector } from './ThemeSelector';
 import { UninstallCADialog } from './UninstallCADialog';
+import { UpstreamProxyInput } from './UpstreamProxyInput';
 
 const GITHUB_URL = 'https://github.com/irbis-sh/zen-desktop';
 const CHANGELOG_URL = `${GITHUB_URL}/blob/master/CHANGELOG.md`;
@@ -71,6 +72,7 @@ export function SettingsManager() {
         </Tag>
 
         <div className="settings-manager__section-body">
+          <UpstreamProxyInput />
           <PortInput />
           <PACPortInput />
           <IgnoredHostsInput />

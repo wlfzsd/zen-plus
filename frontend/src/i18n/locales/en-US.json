@@ -189,6 +189,20 @@
       "enableError": "Failed to enable automatic updates: {{error}}"
     }
   },
+  "upstreamProxyInput": {
+    "description": "Chain all outbound traffic through an upstream proxy. Supports HTTP, HTTPS and SOCKS5.",
+    "enabled": "Enabled",
+    "helper": "Changes take effect after the proxy restarts.",
+    "host": "Host",
+    "label": "Upstream proxy",
+    "password": "Password",
+    "port": "Port",
+    "saveError": "Failed to save upstream proxy: {{error}}",
+    "typeHttp": "HTTP",
+    "typeHttps": "HTTPS",
+    "typeSocks5": "SOCKS5",
+    "username": "Username"
+  },
   "startStopButton": {
     "start": "Start",
     "startError": "Failed to start proxy: {{error}}",

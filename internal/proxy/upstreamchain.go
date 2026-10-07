@@ -1,20 +1,23 @@
 package proxy
 
-// Upstream proxy chaining, enabled through the ZEN_UPSTREAM_PROXY environment
-// variable. When the variable holds a valid HTTP proxy address, every outbound
-// path of the proxy is chained through it:
+// Upstream proxy chaining, configured in the app settings (internal/config,
+// Settings → Advanced) or through the ZEN_UPSTREAM_PROXY environment
+// variable, which keeps its escape-hatch role and wins when both are set.
+// HTTP, HTTPS and SOCKS5 upstreams are supported. When configured, every
+// outbound path of the proxy is chained through it:
 //
 //   - forwarded plain-HTTP requests and MITM'd requests travel through
 //     requestTransport, which gets a Proxy function pointing at the upstream;
 //   - CONNECT tunnels and WebSocket dials bypass the transport and dial with
 //     netDialer; those call sites go through a chainDialer that first
-//     establishes a CONNECT tunnel via the upstream.
+//     establishes a tunnel via the upstream (CONNECT for HTTP(S), the RFC
+//     1928 handshake for SOCKS5).
 //
-// The feature keys off the environment variable alone: unset (or invalid,
-// with a logged warning) means stock behaviour. Loopback destinations and the
-// upstream's own address are always dialed directly - a local service would
-// become unreachable through a remote upstream, and CONNECTing to the
-// upstream through itself would recurse.
+// An unset (or invalid, logged as a warning) configuration means stock
+// behaviour. Loopback destinations and the upstream's own address are always
+// dialed directly - a local service would become unreachable through a
+// remote upstream, and CONNECTing to the upstream through itself would
+// recurse.
 
 import (
 	"bufio"
@@ -30,9 +33,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	netproxy "golang.org/x/net/proxy"
 
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
 )
@@ -65,46 +70,80 @@ const (
 	chainedForceHTTP1 = false
 )
 
-// upstreamConfigFile names the optional file sitting next to the executable
-// holding the upstream proxy address ("http://host:port" or bare "host:port").
-// It lets the chain engage no matter how Zen is started - Start Menu, autostart
-// or double-click - without touching any persistent environment variable.
-const upstreamConfigFile = "upstream-proxy.txt"
+// upstreamProvider hands the app-settings value of the upstream proxy to this
+// package. It is installed once by the app layer at startup
+// (SetUpstreamProvider) and read on every proxy start, so a settings change
+// made while the proxy was stopped takes effect on the next start.
+var upstreamProvider func() (value, source string, ok bool)
+
+// SetUpstreamProvider wires the app-settings source of the upstream proxy
+// address. fn returns the proxy URL ("http", "https" or "socks5" scheme), a
+// human-readable source for log lines, and whether an upstream is enabled.
+// Called once from the app layer before the proxy can start.
+func SetUpstreamProvider(fn func() (value, source string, ok bool)) {
+	upstreamProvider = fn
+	SyncUpstreamEnv()
+}
 
 // resolveUpstreamConfig locates the upstream proxy setting. The environment
-// variable wins when set; otherwise a upstream-proxy.txt next to the
-// executable is read. Returns the raw value, a human-readable source for log
-// lines, and whether anything was found.
+// variable keeps its historical escape-hatch role and wins when set;
+// otherwise the app-settings provider is consulted. Returns the raw value, a
+// human-readable source for log lines, and whether anything was found.
 func resolveUpstreamConfig() (cfg, source string, ok bool) {
 	if v := os.Getenv(upstreamProxyEnv); strings.TrimSpace(v) != "" {
 		return v, upstreamProxyEnv, true
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", "", false
+	if upstreamProvider != nil {
+		return upstreamProvider()
 	}
-	return readUpstreamConfigFile(filepath.Dir(exe))
+	return "", "", false
 }
 
-// readUpstreamConfigFile reads upstream-proxy.txt from dir, tolerating a BOM
-// and surrounding whitespace. A missing file is silently ignored; anything
-// else that goes wrong is logged and treated as "not configured" - a broken
-// config file must never take the proxy down.
-func readUpstreamConfigFile(dir string) (cfg, source string, ok bool) {
-	path := filepath.Join(dir, upstreamConfigFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("upstream proxy: reading %s: %v", path, err)
+// upstreamEnvOwned records that the standard proxy environment variables were
+// set by this package (not by the user or the system), so SyncUpstreamEnv
+// clears them again only when it is safe to do so.
+var upstreamEnvOwned bool
+
+// SyncUpstreamEnv mirrors the resolved upstream proxy into the standard
+// proxy environment variables. Filter-list downloads and update checks use
+// DefaultTransport-based clients, whose proxy lookup reads those variables
+// lazily on first use; mirroring chains them too (loopback targets stay
+// excluded by net/http itself).
+//
+// Called from SetUpstreamProvider at startup and from the app on every proxy
+// start, so a settings change made while the proxy was stopped is picked up
+// by downloads as well. Variables are only cleared when this package set
+// them earlier - a user's own HTTP_PROXY is never touched.
+func SyncUpstreamEnv() {
+	names := []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"}
+
+	cfg, source, ok := resolveUpstreamConfig()
+	var u *url.URL
+	if ok {
+		var err error
+		u, err = parseUpstreamProxyURL(cfg)
+		if err != nil {
+			log.Printf("upstream proxy: ignoring invalid %s=%q from %s: %v", upstreamProxyEnv, cfg, source, err)
+			ok = false
 		}
-		return "", "", false
 	}
-	// Tolerate editors that save a BOM or surrounding whitespace.
-	v := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
-	if v == "" {
-		return "", "", false
+
+	switch {
+	case ok:
+		for _, name := range names {
+			if err := os.Setenv(name, u.String()); err != nil {
+				log.Printf("upstream proxy: setting %s: %v", name, err)
+			}
+		}
+		upstreamEnvOwned = true
+	case upstreamEnvOwned:
+		for _, name := range names {
+			if err := os.Unsetenv(name); err != nil {
+				log.Printf("upstream proxy: clearing %s: %v", name, err)
+			}
+		}
+		upstreamEnvOwned = false
 	}
-	return v, path, true
 }
 
 // UpstreamConfigured reports whether an upstream proxy is currently configured
@@ -138,7 +177,17 @@ func applyUpstreamChain(p *Proxy) {
 		return
 	}
 
-	p.upstreamChain = &chainDialer{inner: p.netDialer, proxyURL: u}
+	d := &chainDialer{inner: p.netDialer, proxyURL: u}
+	if u.Scheme == "socks5" {
+		cd, err := newSOCKS5Dialer(u, p.netDialer)
+		if err != nil {
+			log.Printf("upstream proxy: building socks5 dialer for %s: %v", u.Host, err)
+			return
+		}
+		d.socksDialer = cd
+	}
+
+	p.upstreamChain = d
 	// Plain-HTTP forwarding and MITM'd requests speak through
 	// requestTransport: pointing its Proxy at the upstream chains them. Its
 	// DialContext stays the plain netDialer - the transport dials the
@@ -163,42 +212,20 @@ func applyUpstreamChain(p *Proxy) {
 	}
 	applyChainedTransportHygiene(transport)
 
-	// HTTPS re-originated by the MITM gets a dedicated transport: the chain
-	// tunnel is established here and the TLS handshake replays the client's
-	// captured ClientHello (uTLS), so the request keeps its original TLS
-	// fingerprint end to end. Proxy is nil on purpose - the tunnel is
-	// established inside DialTLSContext, and TLSNextProto is emptied to keep
-	// Go's own h2 out of the re-originated leg. The dialer reads the stock
-	// transport's TLSClientConfig live, so verification customisations made
-	// after the chain is built are still honoured.
-	httpsTransport := &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			start := time.Now()
-			conn, err := p.dialUpstreamMimicTLS(ctx, network, addr, transport.TLSClientConfig)
-			if err != nil {
-				logUpstreamEvent(addr, "mimic-tls", time.Since(start), err)
-			} else if elapsed := time.Since(start); elapsed > slowTunnelLogThreshold {
-				logUpstreamEvent(addr, "mimic-tls", elapsed, nil)
-			}
-			return conn, err
-		},
-		Proxy:        nil,
-		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
-		// Pool caps mirrored from the stock transport (2026-10-03): the
-		// zero-value Transport caps total idle connections at infinity, and
-		// the HTTPS leg rides HTTP/1.1 under the chain (TLSNextProto emptied
-		// above), so every request is a connection. The stock per-host 16
-		// keeps connections alive for reuse instead of re-handshaking with a
-		// fresh mirrored spec per request - fewer handshakes, less allocation
-		// churn - while the global 512 bounds the idle pool; both are pruned
-		// by the chained IdleConnTimeout.
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-	}
-	applyChainedTransportHygiene(httpsTransport)
-	p.requestTransportHTTPS = httpsTransport
+	// HTTPS re-originated by the MITM gets the mimic round tripper (2026-10-07
+	// h2-mirror): the chain tunnel is established inside its dial path, the TLS
+	// handshake replays the client's captured ClientHello (uTLS), and the
+	// protocol matches the inbound connection - an h2 client is re-originated
+	// over HTTP/2 with the h2 fingerprint parameters the tap captured
+	// (reoriginate.go), an HTTP/1.1 client stays on HTTP/1.1. Proxy is nil on
+	// purpose - the tunnel is established inside the dial. The stock
+	// transport's TLSClientConfig is read live, so verification
+	// customisations made after the chain is built are still honoured.
+	p.requestTransportHTTPS = newMimicRoundTripper(p, func() *tls.Config {
+		return transport.TLSClientConfig
+	})
 
-	log.Printf("upstream proxy: chaining outbound traffic through %s (source: %s)", u.Host, source)
+	log.Printf("upstream proxy: chaining outbound traffic through %s://%s (source: %s)", u.Scheme, u.Host, source)
 }
 
 // applyChainedTransportHygiene retunes the transport for upstream-chained
@@ -258,12 +285,21 @@ func (p *Proxy) chainTLSDial(ctx context.Context) func(network, addr string) (ne
 	}
 }
 
-// chainDialer dials TCP addresses through an upstream HTTP proxy, tunneling
-// each target with CONNECT. It offers the DialContext/Dial surface the
-// netDialer call sites expect.
+// chainDialer dials TCP addresses through an upstream proxy, establishing a
+// tunnel per target: CONNECT for HTTP(S) upstreams, the RFC 1928 handshake
+// for SOCKS5. It offers the DialContext/Dial surface the netDialer call
+// sites expect.
 type chainDialer struct {
 	inner    *net.Dialer
 	proxyURL *url.URL
+	// socksDialer is set when the upstream speaks SOCKS5; built once from
+	// x/net's socks implementation, with proxyURL's credentials and inner as
+	// the dialer for the connection to the proxy.
+	socksDialer netproxy.ContextDialer
+	// proxyTLSConfig TLS-wraps the connection to an "https" upstream. nil
+	// means the defaults (system roots). Tests inject skip-verify to talk to
+	// httptest servers.
+	proxyTLSConfig *tls.Config
 }
 
 // slowTunnelLogThreshold bounds the "healthy but slow" noise floor: only
@@ -289,14 +325,81 @@ func (d *chainDialer) DialContext(ctx context.Context, network, addr string) (ne
 	}
 
 	if network != "tcp" {
-		return nil, fmt.Errorf("upstream proxy: unsupported network %q for CONNECT", network)
+		return nil, fmt.Errorf("upstream proxy: unsupported network %q for a tunnel", network)
 	}
 
+	if d.socksDialer != nil {
+		return d.dialSOCKS5(ctx, addr)
+	}
+	return d.dialHTTPTunnel(ctx, addr)
+}
+
+// newSOCKS5Dialer builds the x/net SOCKS5 dialer for the upstream: the
+// credentials come from the URL userinfo, connections to the proxy are dialed
+// through inner.
+func newSOCKS5Dialer(u *url.URL, inner *net.Dialer) (netproxy.ContextDialer, error) {
+	var auth *netproxy.Auth
+	if u.User != nil {
+		password, _ := u.User.Password()
+		auth = &netproxy.Auth{User: u.User.Username(), Password: password}
+	}
+	sd, err := netproxy.SOCKS5("tcp", u.Host, auth, inner)
+	if err != nil {
+		return nil, err
+	}
+	cd, ok := sd.(netproxy.ContextDialer)
+	if !ok {
+		return nil, errors.New("socks5 dialer does not support DialContext")
+	}
+	return cd, nil
+}
+
+// dialSOCKS5 tunnels addr through the SOCKS5 upstream. The handshake (method
+// negotiation, optional username/password auth, CONNECT) is handled by
+// x/net's socks dialer, which honours the ctx deadline and sends non-IP
+// targets as domain names so DNS stays at the proxy.
+func (d *chainDialer) dialSOCKS5(ctx context.Context, addr string) (net.Conn, error) {
+	start := time.Now()
+	conn, err := d.socksDialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		logUpstreamEvent(addr, "socks5", time.Since(start), err)
+		return nil, fmt.Errorf("socks5 tunnel to %s via %s: %w", redacted.Redacted(addr), d.proxyURL.Host, err)
+	}
+	if elapsed := time.Since(start); elapsed > slowTunnelLogThreshold {
+		logUpstreamEvent(addr, "socks5", elapsed, nil)
+	}
+	return conn, nil
+}
+
+// dialHTTPTunnel tunnels addr through the HTTP(S) upstream: dial the proxy,
+// TLS-wrap the connection first for an https upstream, then CONNECT.
+func (d *chainDialer) dialHTTPTunnel(ctx context.Context, addr string) (net.Conn, error) {
 	start := time.Now()
 	conn, err := d.inner.DialContext(ctx, "tcp", d.proxyURL.Host)
 	if err != nil {
 		logUpstreamEvent(addr, "dial-proxy", time.Since(start), err)
 		return nil, fmt.Errorf("dialing upstream proxy %s: %w", d.proxyURL.Host, err)
+	}
+
+	if d.proxyURL.Scheme == "https" {
+		cfg := d.proxyTLSConfig
+		if cfg == nil {
+			cfg = &tls.Config{}
+		}
+		cfg = cfg.Clone()
+		if cfg.ServerName == "" {
+			cfg.ServerName = hostOnly(d.proxyURL.Host)
+		}
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+		tlsConn := tls.Client(conn, cfg)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			logUpstreamEvent(addr, "proxy-tls", time.Since(start), err)
+			return nil, fmt.Errorf("TLS handshake with upstream proxy %s: %w", d.proxyURL.Host, err)
+		}
+		conn = tlsConn
 	}
 
 	tunneled, err := tunnelThroughUpstream(ctx, conn, d.proxyURL, addr)
@@ -437,9 +540,10 @@ func proxyAuthorization(u *url.URL) string {
 	return "Basic " + token
 }
 
-// parseUpstreamProxyURL normalises a ZEN_UPSTREAM_PROXY value into an HTTP
-// proxy URL. Bare "host:port" is accepted and read as http; the port defaults
-// to 80 when omitted. Any other scheme is rejected.
+// parseUpstreamProxyURL normalises an upstream proxy value into a proxy URL.
+// Bare "host:port" is accepted and read as http. Supported schemes: http
+// (default port 80), https (443) and socks5/socks5h (1080; both are treated
+// as socks5, which resolves target hostnames at the proxy).
 func parseUpstreamProxyURL(cfg string) (*url.URL, error) {
 	cfg = strings.TrimSpace(cfg)
 	if cfg == "" {
@@ -452,8 +556,12 @@ func parseUpstreamProxyURL(cfg string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing URL: %w", err)
 	}
-	if u.Scheme != "http" {
-		return nil, fmt.Errorf("unsupported scheme %q: only http upstream proxies are supported", u.Scheme)
+	switch u.Scheme {
+	case "http", "https", "socks5":
+	case "socks5h":
+		u.Scheme = "socks5"
+	default:
+		return nil, fmt.Errorf("unsupported scheme %q: supported upstream proxies are http, https and socks5", u.Scheme)
 	}
 	if u.Hostname() == "" {
 		return nil, errors.New("missing host")
@@ -462,7 +570,16 @@ func parseUpstreamProxyURL(cfg string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid host %q", u.Hostname())
 	}
 	if u.Port() == "" {
-		u.Host = net.JoinHostPort(u.Hostname(), "80")
+		defaultPort := "80"
+		switch u.Scheme {
+		case "https":
+			defaultPort = "443"
+		case "socks5":
+			defaultPort = "1080"
+		}
+		u.Host = net.JoinHostPort(u.Hostname(), defaultPort)
+	} else if n, err := strconv.Atoi(u.Port()); err != nil || n <= 0 || n > 65535 {
+		return nil, fmt.Errorf("invalid port %q", u.Port())
 	}
 	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("unexpected path or query in proxy URL")
@@ -504,25 +621,4 @@ func hostOnly(addr string) string {
 		return addr
 	}
 	return host
-}
-
-// Filter-list downloads and update checks use DefaultTransport-based clients,
-// whose proxy lookup reads the standard environment variables lazily on first
-// use - long after package init. Mirroring the upstream setting into those
-// variables chains them too; loopback targets stay excluded by net/http.
-func init() {
-	cfg, source, ok := resolveUpstreamConfig()
-	if !ok {
-		return
-	}
-	u, err := parseUpstreamProxyURL(cfg)
-	if err != nil {
-		log.Printf("upstream proxy: ignoring invalid %s=%q from %s: %v", upstreamProxyEnv, cfg, source, err)
-		return
-	}
-	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
-		if err := os.Setenv(name, u.String()); err != nil {
-			log.Printf("upstream proxy: setting %s: %v", name, err)
-		}
-	}
 }

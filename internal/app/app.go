@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,6 +96,15 @@ func NewApp(name string, appConfig *config.Config, startOnDomReady bool) (*App, 
 
 	systemProxyManager := sysproxy.NewManager(appConfig.GetPACPort())
 
+	// The upstream proxy is configured in the app settings (Settings →
+	// Advanced); wire the provider so the proxy package reads the current
+	// value on every proxy start. The ZEN_UPSTREAM_PROXY environment variable
+	// keeps its escape-hatch role and wins when set.
+	proxy.SetUpstreamProvider(func() (string, string, bool) {
+		value, ok := appConfig.UpstreamProxyURL()
+		return value, "app settings", ok
+	})
+
 	return &App{
 		name:               name,
 		startupDone:        make(chan struct{}),
@@ -121,6 +132,7 @@ func (a *App) commonStartup(ctx context.Context) {
 	a.systrayMgr = systrayMgr
 	a.frontendEvents = newFrontendEvents(ctx)
 	a.config.RunMigrations()
+	a.importLegacyUpstreamConfig()
 	a.systrayMgr.Init(ctx)
 
 	su, err := selfupdate.NewSelfUpdater(a.config, a.frontendEvents)
@@ -140,6 +152,43 @@ func (a *App) commonStartup(ctx context.Context) {
 	})
 
 	close(a.startupDone)
+}
+
+// importLegacyUpstreamConfig carries a pre-settings upstream-proxy.txt (the
+// 2026-09-18..2026-10-07 config mechanism, a proxy URL sitting next to the
+// executable) into the app settings, once, so updating keeps the configured
+// upstream. The value is stored through the normal settings path (which
+// saves config.json immediately) and the file renamed to *.migrated so the
+// import cannot repeat; settings win whenever they already carry an entry.
+func (a *App) importLegacyUpstreamConfig() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	legacy := filepath.Join(filepath.Dir(exe), "upstream-proxy.txt")
+	data, err := os.ReadFile(legacy)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("upstream proxy: reading legacy config %s: %v", legacy, err)
+		}
+		return
+	}
+	value := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
+	if value == "" {
+		return
+	}
+	if a.config.HasUpstreamProxy() {
+		log.Printf("upstream proxy: legacy %s present but an upstream is already configured in app settings; not importing", legacy)
+		return
+	}
+	if err := a.config.SetUpstreamFromLegacyURL(value); err != nil {
+		log.Printf("upstream proxy: importing legacy %s: %v", legacy, err)
+		return
+	}
+	if err := os.Rename(legacy, legacy+".migrated"); err != nil {
+		log.Printf("upstream proxy: marking legacy %s as migrated: %v", legacy, err)
+	}
+	log.Printf("upstream proxy: imported legacy config %s into app settings", legacy)
 }
 
 func (a *App) BeforeClose(ctx context.Context) bool {
@@ -191,6 +240,12 @@ func (a *App) StartProxy() (err error) {
 	}
 
 	log.Println("starting proxy")
+
+	// Re-mirror the upstream proxy setting into the standard proxy
+	// environment variables: a settings change made while the proxy was
+	// stopped must reach the filter-list downloads in buildFilter below, not
+	// only the transports built in NewProxy.
+	proxy.SyncUpstreamEnv()
 
 	a.frontendEvents.OnProxyStarting()
 	defer func() {

@@ -385,6 +385,14 @@
     "routing": {
       "mode": "blocklist",
       "appPaths": []
+    },
+    "upstream": {
+      "enabled": false,
+      "type": "http",
+      "host": "",
+      "port": 0,
+      "username": "",
+      "password": ""
     }
   },
   "updatePolicy": "automatic"

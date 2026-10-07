@@ -3,11 +3,15 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -63,6 +67,30 @@ type RoutingConfig struct {
 	AppPaths []string    `json:"appPaths"`
 }
 
+// UpstreamProxyType names the protocol spoken to the upstream proxy.
+type UpstreamProxyType string
+
+const (
+	UpstreamProxyHTTP   UpstreamProxyType = "http"
+	UpstreamProxyHTTPS  UpstreamProxyType = "https"
+	UpstreamProxySOCKS5 UpstreamProxyType = "socks5"
+)
+
+// UpstreamProxyConfig describes the optional upstream proxy every outbound
+// connection of the proxy chains through. Configured from the app settings
+// (Settings → Advanced); stored as part of config.json.
+type UpstreamProxyConfig struct {
+	Enabled bool              `json:"enabled"`
+	Type    UpstreamProxyType `json:"type"`
+	Host    string            `json:"host"`
+	Port    int               `json:"port"`
+	// Username and Password are optional proxy credentials. Both upstream
+	// protocols support them: Basic proxy-auth for HTTP(S), the RFC 1929
+	// username/password subnegotiation for SOCKS5.
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
 type FilterListType string
 
 const (
@@ -104,10 +132,11 @@ type Config struct {
 		CAInstalled bool `json:"caInstalled"`
 	} `json:"certmanager"`
 	Proxy struct {
-		Port         int           `json:"port"`
-		IgnoredHosts []string      `json:"ignoredHosts"`
-		PACPort      int           `json:"pacPort"`
-		Routing      RoutingConfig `json:"routing"`
+		Port         int                 `json:"port"`
+		IgnoredHosts []string            `json:"ignoredHosts"`
+		PACPort      int                 `json:"pacPort"`
+		Routing      RoutingConfig       `json:"routing"`
+		Upstream     UpstreamProxyConfig `json:"upstream"`
 	} `json:"proxy"`
 	UpdatePolicy UpdatePolicyType `json:"updatePolicy"`
 
@@ -399,6 +428,128 @@ func (c *Config) SetRouting(routing RoutingConfig) error {
 	return c.update(func() error {
 		c.Proxy.Routing = routing
 		return nil
+	})
+}
+
+// GetUpstreamProxy returns the upstream proxy configuration.
+func (c *Config) GetUpstreamProxy() UpstreamProxyConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.Proxy.Upstream
+}
+
+// SetUpstreamProxy validates and stores the upstream proxy configuration.
+// When enabled, the type must be one of http/https/socks5 and the host and
+// port must be present. The whole struct is stored even when disabled, so
+// toggling the proxy back on keeps the last-used address.
+func (c *Config) SetUpstreamProxy(up UpstreamProxyConfig) error {
+	up.Type = UpstreamProxyType(strings.ToLower(strings.TrimSpace(string(up.Type))))
+	up.Host = strings.TrimSpace(up.Host)
+	if up.Enabled {
+		switch up.Type {
+		case UpstreamProxyHTTP, UpstreamProxyHTTPS, UpstreamProxySOCKS5:
+		default:
+			return fmt.Errorf("unsupported upstream proxy type %q (want http, https or socks5)", up.Type)
+		}
+		if up.Host == "" {
+			return errors.New("upstream proxy host is empty")
+		}
+		if up.Port <= 0 || up.Port > 65535 {
+			return fmt.Errorf("upstream proxy port %d out of range", up.Port)
+		}
+	}
+
+	return c.update(func() error {
+		c.Proxy.Upstream = up
+		return nil
+	})
+}
+
+// HasUpstreamProxy reports whether an enabled upstream proxy is configured.
+func (c *Config) HasUpstreamProxy() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.Proxy.Upstream.Enabled
+}
+
+// UpstreamProxyURL renders the configured upstream proxy as a proxy URL for
+// the proxy package ("http", "https" or "socks5" scheme, optional
+// user:pass@ credentials, host:port with IPv6 literals bracketed). ok is
+// false when the upstream is disabled or has no host.
+func (c *Config) UpstreamProxyURL() (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	up := c.Proxy.Upstream
+	if !up.Enabled || up.Host == "" {
+		return "", false
+	}
+	u := url.URL{
+		Scheme: string(up.Type),
+		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
+	}
+	if up.Username != "" || up.Password != "" {
+		u.User = url.UserPassword(up.Username, up.Password)
+	}
+	return u.String(), true
+}
+
+// SetUpstreamFromLegacyURL imports a legacy upstream-proxy.txt value (a bare
+// "host:port" or a proxy URL) into the app settings. It exists for the
+// one-time startup migration from the 2026-09-18 config-file mechanism and
+// stores the parsed value enabled.
+func (c *Config) SetUpstreamFromLegacyURL(raw string) error {
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "\ufeff"))
+	if raw == "" {
+		return errors.New("empty upstream proxy value")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse upstream proxy URL: %w", err)
+	}
+	var typ UpstreamProxyType
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		typ = UpstreamProxyHTTP
+	case "https":
+		typ = UpstreamProxyHTTPS
+	case "socks5", "socks5h":
+		typ = UpstreamProxySOCKS5
+	default:
+		return fmt.Errorf("unsupported upstream proxy scheme %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("upstream proxy URL is missing a host")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		switch typ {
+		case UpstreamProxyHTTP:
+			port = 80
+		case UpstreamProxyHTTPS:
+			port = 443
+		case UpstreamProxySOCKS5:
+			port = 1080
+		}
+	}
+	var username, password string
+	if u.User != nil {
+		username = u.User.Username()
+		password, _ = u.User.Password()
+	}
+	return c.SetUpstreamProxy(UpstreamProxyConfig{
+		Enabled:  true,
+		Type:     typ,
+		Host:     host,
+		Port:     port,
+		Username: username,
+		Password: password,
 	})
 }
 

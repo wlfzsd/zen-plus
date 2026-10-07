@@ -189,6 +189,20 @@
       "enableError": "无法启用自动更新：{{error}}"
     }
   },
+  "upstreamProxyInput": {
+    "description": "将所有出站流量经上游代理转发。支持 HTTP、HTTPS 与 SOCKS5。",
+    "enabled": "启用",
+    "helper": "修改在代理重启后生效。",
+    "host": "主机",
+    "label": "上游代理",
+    "password": "密码",
+    "port": "端口",
+    "saveError": "保存上游代理失败：{{error}}",
+    "typeHttp": "HTTP",
+    "typeHttps": "HTTPS",
+    "typeSocks5": "SOCKS5",
+    "username": "用户名"
+  },
   "startStopButton": {
     "start": "启动",
     "startError": "启动代理失败：{{error}}",
