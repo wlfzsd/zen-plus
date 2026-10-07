@@ -106,16 +106,13 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	initialURL := req.URL.String()
 
-	var query url.Values
-	if req.URL.RawQuery != "" {
-		query = req.URL.Query()
-	}
-
-	var queryModified bool
 outer:
 	for _, r := range primaryRules {
 		for _, ex := range exceptions {
-			if ex.Cancels(r) {
+			// 2026-10-08 (port): adapted to the B2 Cancels signature — the
+			// probe's exceptions are request-matched (ShouldMatchReq above),
+			// so pageSurface is false. Call-shape-only change.
+			if ex.Cancels(r, req, false) {
 				continue outer
 			}
 		}
@@ -124,9 +121,12 @@ outer:
 		}
 
 		modified := r.ModifyReq(req)
-		if query != nil {
-			if r.ModifyReqQuery(query) {
-				queryModified = true
+		// 2026-10-08 (port): adapted to the B7 ModifyReqQuery signature —
+		// the whole request is passed and query modifiers rewrite
+		// req.URL.RawQuery in place; the old decoded url.Values round-trip
+		// (parse once, Encode back) is gone with it.
+		if req.URL.RawQuery != "" {
+			if r.ModifyReqQuery(req) {
 				modified = true
 			}
 		}
@@ -134,12 +134,6 @@ outer:
 		if modified {
 			appliedRules = append(appliedRules, *r)
 		}
-	}
-
-	if queryModified {
-		// Re-encoding the same query params may cause subtle normalization changes
-		// (e.g. parameter reordering), so only do it if they were actually modified.
-		req.URL.RawQuery = query.Encode()
 	}
 
 	finalURL := req.URL.String()
@@ -184,7 +178,10 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 outer:
 	for _, r := range primaryRules {
 		for _, ex := range exceptions {
-			if ex.Cancels(r) {
+			// 2026-10-08 (port): adapted to the B2 Cancels signature
+			// (call-shape-only change; the probe's exception filtering by
+			// ShouldMatchRes is kept as before).
+			if ex.Cancels(r, req, false) {
 				continue outer
 			}
 		}

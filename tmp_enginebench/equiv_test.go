@@ -107,6 +107,11 @@ func sampleOutcomes(run func(*http.Request) engineResult, i int, u string, urls 
 // TestEngineEquivalenceReal compares the slimmed production engine with the
 // frozen baseline on >=5000 real URLs (block / redirectURL / applied-rule set).
 func TestEngineEquivalenceReal(t *testing.T) {
+	// 2026-10-08: AdGuard 兼容性批次（B1-B8）有意变更生产引擎判定语义，
+	// 与冻结基线 baselinenr 的等价性对拍默认跳过；设 ZEN_ENGINEDIFF=1 复跑。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	urls := loadURLs(t, 10000)
 	if len(urls) < 5000 {
 		t.Fatalf("need >=5000 urls, got %d", len(urls))

@@ -140,6 +140,13 @@ func adtestBuildReq(u, site, dest, referer, userNav string) *http.Request {
 // ---------------- 1) 双引擎一致性：全数据集 × 8 头组合 ----------------
 
 func TestAdTestDualEngineConsistency(t *testing.T) {
+	// 2026-10-08: 生产引擎的判定语义已被 AdGuard 兼容性批次（B1-B8：
+	// $popup、例外逐请求判定、$denyallow、短规则拒收等）有意变更，与本文件
+	// 顶部冻结基线 baselinenr 的 golden-master 对拍前提不再成立，默认跳过。
+	// 设 ZEN_ENGINEDIFF=1 复跑对拍（差异清单见批次报告）。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	if testing.Short() {
 		t.Skip("全量语料装载耗时长，-short 跳过")
 	}
@@ -334,6 +341,12 @@ func TestAdTestGeneralAdDomains(t *testing.T) {
 // ---------------- 4) ModifyRes 一致性（20 条 text/html 响应） ----------------
 
 func TestAdTestModifyResConsistency(t *testing.T) {
+	// 2026-10-08: 同 TestAdTestDualEngineConsistency——AdGuard 兼容性批次
+	// （B1-B8）有意变更生产语义后，与冻结基线的对拍默认跳过；
+	// 设 ZEN_ENGINEDIFF=1 复跑对拍。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	if testing.Short() {
 		t.Skip("全量语料装载耗时长，-short 跳过")
 	}

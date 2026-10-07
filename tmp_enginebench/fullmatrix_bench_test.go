@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/filter"
 	"github.com/irbis-sh/zen-desktop/internal/filterliststore"
 	prodnr "github.com/irbis-sh/zen-desktop/internal/networkrules"
@@ -181,8 +182,14 @@ func BenchmarkFMModifyResRealBaseline(b *testing.B) {
 
 type fmStubInjector struct{}
 
-func (fmStubInjector) AddRule(string, bool) (bool, error)         { return false, nil }
-func (fmStubInjector) Inject(*http.Request, *http.Response) error { return nil }
+func (fmStubInjector) AddRule(string, bool) (bool, error) { return false, nil }
+
+// 2026-10-08 (port): adapted to the B2 documentInjector signature (variadic
+// exemption parameter). The stub body is never executed: the benchmarks only
+// call HandleRequest, which does not inject.
+func (fmStubInjector) Inject(*http.Request, *http.Response, ...exemption.Exemption) error {
+	return nil
+}
 
 type fmStubListStore struct{}
 
@@ -367,6 +374,13 @@ func TestFMGCStatsModifyReq(t *testing.T) {
 // 每行比对 (isException, err==nil)。流式处理：不物化全量行切片、不建行去重
 // 表（去重不影响逐行 接受/拒绝 判定——两引擎收到同一行序列）。
 func TestFMParseRuleCompatReal(t *testing.T) {
+	// 2026-10-08: AdGuard 兼容性批次（B1-B8）有意变更了生产引擎的规则
+	// 接受/拒绝面（接受 $popup/$cookie/$denyallow 等，拒收 <4 字符规则与
+	// @@$all），与冻结基线 baselinenr 的逐行对拍默认跳过；
+	// 设 ZEN_ENGINEDIFF=1 复跑对拍。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	nrP := prodnr.New()
 	nrB := basenr.New()
 	name := "compat"

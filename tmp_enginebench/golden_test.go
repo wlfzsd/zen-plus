@@ -486,6 +486,12 @@ func goldenCallProduction(e *prodnr.NetworkRules, u string, c goldenCombo, refer
 // ---------------- 主对拍测试 ----------------
 
 func TestGoldenCompare(t *testing.T) {
+	// 2026-10-08: AdGuard 兼容性批次（B1-B8）有意变更生产引擎判定语义
+	// （$popup 复活、例外逐请求判定、$denyallow 等），与冻结基线
+	// baselinenr 的黄金对拍默认跳过；设 ZEN_ENGINEDIFF=1 复跑对拍。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	if testing.Short() {
 		t.Skip("golden 对拍耗时长，-short 跳过")
 	}
@@ -700,6 +706,12 @@ func goldenAdversarialRules(t testing.TB) []struct {
 }
 
 func TestGoldenAdversarialRules(t *testing.T) {
+	// 2026-10-08: AdGuard 兼容性批次（B1-B8）有意变更了生产引擎的规则
+	// 接受/拒绝面（如 <4 字符规则拒收、@@$all 拒收）与判定语义，与冻结
+	// 基线 baselinenr 的对抗性对拍默认跳过；设 ZEN_ENGINEDIFF=1 复跑对拍。
+	if os.Getenv("ZEN_ENGINEDIFF") == "" {
+		t.Skip("golden-master 前提已被 AdGuard 兼容性批次有意变更——设 ZEN_ENGINEDIFF=1 复跑对拍")
+	}
 	rules := goldenAdversarialRules(t)
 	if len(rules) < 50 {
 		t.Fatalf("对抗性规则不足 50 条：实际 %d", len(rules))
