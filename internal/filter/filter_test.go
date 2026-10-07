@@ -12,6 +12,7 @@ import (
 	"testing"
 	"testing/iotest"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/filterliststore"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 	"github.com/irbis-sh/zen-desktop/internal/process"
@@ -567,10 +568,18 @@ func (n *fakeNetworkRules) CreateBlockPageResponse(*http.Request, []rule.Rule, i
 }
 func (n *fakeNetworkRules) Compact() {}
 
+// ActiveExceptions (2026-10-08 B2 interface method): the fake never grants
+// exemptions, so HandleResponse sees the zero value (pre-B2 behavior).
+func (n *fakeNetworkRules) ActiveExceptions(*http.Request) exemption.Exemption {
+	return exemption.Exemption{}
+}
+
 type fakeInjector struct{}
 
-func (fakeInjector) AddRule(string, bool) (bool, error)         { return false, nil }
-func (fakeInjector) Inject(*http.Request, *http.Response) error { return nil }
+func (fakeInjector) AddRule(string, bool) (bool, error) { return false, nil }
+func (fakeInjector) Inject(*http.Request, *http.Response, ...exemption.Exemption) error {
+	return nil
+}
 
 type injectedRule struct {
 	rule    string
@@ -596,7 +605,9 @@ func (i *recordingInjector) got() []injectedRule {
 	return slices.Clone(i.rules)
 }
 
-func (*recordingInjector) Inject(*http.Request, *http.Response) error { return nil }
+func (*recordingInjector) Inject(*http.Request, *http.Response, ...exemption.Exemption) error {
+	return nil
+}
 
 type fakeObserver struct{}
 

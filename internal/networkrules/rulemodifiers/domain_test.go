@@ -79,11 +79,24 @@ func TestDomainModifier(t *testing.T) {
 		}
 	})
 
-	t.Run("Should fail on inverted and non-inverted domains", func(t *testing.T) {
+	// 2026-10-08 (B5): mixed negated/non-negated $domain values are valid —
+	// per-entry negation is the AdGuard syntax (docs 533-564; sandbox B5-P03
+	// "domain=example.org|~foo.example.org" parses and matches per entry).
+	t.Run("Should parse mixed inverted and non-inverted domains", func(t *testing.T) {
 		t.Parallel()
-		m := DomainModifier{}
-		if err := m.Parse("domain=example.com|~example.org"); err == nil {
-			t.Error("domainModifier.Parse(\"domain=example.com|~example.org\") = nil, want error")
+		m := newDomainModifier(t, "domain=example.org|~foo.example.org")
+
+		req := newRequestWithReferer("http://example.org/")
+		if !m.ShouldMatchReq(req) {
+			t.Error("domain=example.org|~foo.example.org should match example.org")
+		}
+		req = newRequestWithReferer("http://foo.example.org/")
+		if m.ShouldMatchReq(req) {
+			t.Error("domain=example.org|~foo.example.org must not match negated foo.example.org")
+		}
+		req = newRequestWithReferer("http://bar.example.org/")
+		if !m.ShouldMatchReq(req) {
+			t.Error("domain=example.org|~foo.example.org should match bar.example.org")
 		}
 	})
 
@@ -124,20 +137,20 @@ func TestDomainModifier(t *testing.T) {
 				true,
 			},
 			{
+				// 2026-10-08 (B5): negation is per-entry now; the former
+				// modifier-level inverted flag moved onto each entry.
 				"Should cancel - different order of entries",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
-						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
+						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2"), inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2")},
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2"), inverted: true},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				true,
 			},
@@ -145,17 +158,15 @@ func TestDomainModifier(t *testing.T) {
 				"Should cancel - regex is nil",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: nil},
-						{regular: "reg2", tld: "top2", regexp: nil},
+						{regular: "reg1", tld: "top1", regexp: nil, inverted: true},
+						{regular: "reg2", tld: "top2", regexp: nil, inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg2", tld: "top2", regexp: nil},
-						{regular: "reg1", tld: "top1", regexp: nil},
+						{regular: "reg2", tld: "top2", regexp: nil, inverted: true},
+						{regular: "reg1", tld: "top1", regexp: nil, inverted: true},
 					},
-					inverted: true,
 				},
 				true,
 			},
@@ -163,15 +174,13 @@ func TestDomainModifier(t *testing.T) {
 				"Should not cancel - Different regular values",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg2", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg2", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				false,
 			},
@@ -179,15 +188,13 @@ func TestDomainModifier(t *testing.T) {
 				"Should not cancel - Different TLD values",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top2", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top2", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				false,
 			},
@@ -195,15 +202,13 @@ func TestDomainModifier(t *testing.T) {
 				"Should not cancel - Different regex patterns",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("2")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("2"), inverted: true},
 					},
-					inverted: true,
 				},
 				false,
 			},
@@ -211,15 +216,13 @@ func TestDomainModifier(t *testing.T) {
 				"Should not cancel - Different inverted value",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: false},
 					},
-					inverted: false,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
 					},
-					inverted: true,
 				},
 				false,
 			},
@@ -227,17 +230,15 @@ func TestDomainModifier(t *testing.T) {
 				"Should not cancel - One of regexes is nil",
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1")},
-						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2")},
+						{regular: "reg1", tld: "top1", regexp: regexp.MustCompile("1"), inverted: true},
+						{regular: "reg2", tld: "top2", regexp: regexp.MustCompile("2"), inverted: true},
 					},
-					inverted: true,
 				},
 				DomainModifier{
 					entries: []domainModifierEntry{
-						{regular: "reg2", tld: "top2", regexp: nil},
-						{regular: "reg1", tld: "top1", regexp: nil},
+						{regular: "reg2", tld: "top2", regexp: nil, inverted: true},
+						{regular: "reg1", tld: "top1", regexp: nil, inverted: true},
 					},
-					inverted: true,
 				},
 				false,
 			},

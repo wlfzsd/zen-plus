@@ -9,7 +9,9 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/hostmatch"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
 )
@@ -34,6 +36,11 @@ type Injector struct {
 	bundle []byte
 	// store stores and retrieves extended CSS rules by hostname.
 	store store
+
+	// classification (2026-10-08 B2): see cosmetic.Injector.
+	mu       sync.RWMutex
+	generic  map[string]struct{}
+	specific map[string]struct{}
 }
 
 func NewInjectorWithDefaults() (*Injector, error) {
@@ -60,6 +67,7 @@ func (inj *Injector) AddRule(rule string) error {
 	if match := primaryRuleRegex.FindStringSubmatch(rule); match != nil {
 		hostnamePatters := match[1]
 		selector := match[2]
+		inj.classify(hostnamePatters, selector)
 		if err := inj.store.AddPrimaryRule(hostnamePatters, selector); err != nil {
 			return fmt.Errorf("add primary rule: %v", err)
 		}
@@ -67,6 +75,7 @@ func (inj *Injector) AddRule(rule string) error {
 	} else if match := exceptionRuleRegex.FindStringSubmatch(rule); match != nil {
 		hostnamePatterns := match[1]
 		selector := match[2]
+		// #@?# exceptions only remove selectors; no classification needed.
 		if err := inj.store.AddExceptionRule(hostnamePatterns, selector); err != nil {
 			return fmt.Errorf("add exception rule: %v", err)
 		}
@@ -75,9 +84,38 @@ func (inj *Injector) AddRule(rule string) error {
 	return errors.New("unknown rule format")
 }
 
+// classify records whether an extended-css selector instance is generic or
+// specific (2026-10-08 B2). An instance can appear in both classes.
+func (inj *Injector) classify(hostnamePatterns, selector string) {
+	generic := hostmatch.IsGenericPatternSet(hostnamePatterns)
+	inj.mu.Lock()
+	defer inj.mu.Unlock()
+	if inj.generic == nil {
+		inj.generic = make(map[string]struct{})
+	}
+	if inj.specific == nil {
+		inj.specific = make(map[string]struct{})
+	}
+	if generic {
+		inj.generic[selector] = struct{}{}
+	} else {
+		inj.specific[selector] = struct{}{}
+	}
+}
+
 // GetAsset returns the JS asset for the given hostname.
-func (inj *Injector) GetAsset(hostname string) ([]byte, error) {
+//
+// 2026-10-08 (B2): ex carries the $elemhide/$generichide/$specifichide
+// exemptions (extended CSS is part of the elemhide/generichide/specifichide
+// surface; see cosmetic.Injector for the filtering semantics).
+func (inj *Injector) GetAsset(hostname string, ex ...exemption.Exemption) ([]byte, error) {
+	if len(ex) > 0 && ex[0].Elemhide {
+		return nil, nil
+	}
 	rules := inj.store.Get(hostname)
+	if len(ex) > 0 && (ex[0].Generichide || ex[0].Specifichide) {
+		rules = inj.filterHide(rules, ex[0])
+	}
 	log.Printf("got %d extended-css rules for %q", len(rules), redacted.Redacted(hostname))
 	if len(rules) == 0 {
 		return nil, nil
@@ -99,4 +137,24 @@ func (inj *Injector) GetAsset(hostname string) ([]byte, error) {
 	injection.WriteString(")})();")
 
 	return injection.Bytes(), nil
+}
+
+// filterHide applies the $generichide / $specifichide exemptions
+// (2026-10-08 B2).
+func (inj *Injector) filterHide(items []string, ex exemption.Exemption) []string {
+	inj.mu.RLock()
+	defer inj.mu.RUnlock()
+	out := items[:0]
+	for _, s := range items {
+		_, g := inj.generic[s]
+		_, sp := inj.specific[s]
+		if ex.Generichide && g && !sp {
+			continue
+		}
+		if ex.Specifichide && sp && !g {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }

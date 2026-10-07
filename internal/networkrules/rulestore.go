@@ -176,3 +176,17 @@ func (s *ruleStore[T]) Compact() {
 	s.regexp = trimslice.TrimSlice(s.regexp)
 	s.tree.Compact()
 }
+
+// walkValues calls fn for every value stored in the store — the generic
+// slice, the regexp slice and the whole pattern tree — in no particular
+// order. Used once post-load by $badfilter application (networkrules.Compact,
+// 2026-10-08 B6); the same Insert/Compact exclusion as Get applies.
+func (s *ruleStore[T]) walkValues(fn func(T)) {
+	for i := range s.generic {
+		fn(s.generic[i])
+	}
+	for i := range s.regexp {
+		fn(s.regexp[i].value)
+	}
+	s.tree.Walk(fn)
+}

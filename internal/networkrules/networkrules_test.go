@@ -239,48 +239,43 @@ func TestExceptionRules(t *testing.T) {
 		}
 	})
 
-	t.Run("all exception cancels all primary", func(t *testing.T) {
+	// 2026-10-08 (B1): @@$all is rejected at parse time (AdGuard docs
+	// 1453-1457: $all cannot be used as an exception; sandbox B1P06/B1M17),
+	// so the exception never reaches the store and the primary rule keeps
+	// blocking. $all remains valid as a primary rule (B1P08).
+	t.Run("all exception is rejected, all primary keeps blocking", func(t *testing.T) {
 		t.Parallel()
 
 		nr := New()
 		if _, err := nr.ParseRule(`||example.com^$all`, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := nr.ParseRule(`@@||example.com^$all`, nil); err != nil {
-			t.Fatal(err)
-		}
-
-		navigationHeaders := http.Header{
-			"Sec-Fetch-Dest": []string{"document"},
-			"Sec-Fetch-User": []string{"?1"},
-		}
-		_, shouldBlock, _ := nr.ModifyReq(newTestRequest(t, "https://example.com/", navigationHeaders))
-		if shouldBlock {
-			t.Error("expected all exception to cancel all primary rule on user navigation")
+		if _, err := nr.ParseRule(`@@||example.com^$all`, nil); err == nil {
+			t.Error("expected @@$all to be rejected at parse time (docs 1453-1457)")
 		}
 
 		scriptHeaders := http.Header{"Sec-Fetch-Dest": []string{"script"}}
-		_, shouldBlock, _ = nr.ModifyReq(newTestRequest(t, "https://example.com/script.js", scriptHeaders))
-		if shouldBlock {
-			t.Error("expected all exception to cancel all primary rule on subresource")
+		_, shouldBlock, _ := nr.ModifyReq(newTestRequest(t, "https://example.com/script.js", scriptHeaders))
+		if !shouldBlock {
+			t.Error("expected all primary rule to keep blocking after the exception is rejected")
 		}
 	})
 
-	t.Run("all exception cancels non-document primary", func(t *testing.T) {
+	t.Run("all exception is rejected, script primary keeps blocking", func(t *testing.T) {
 		t.Parallel()
 
 		nr := New()
 		if _, err := nr.ParseRule(`||example.com^$script`, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := nr.ParseRule(`@@||example.com^$all`, nil); err != nil {
-			t.Fatal(err)
+		if _, err := nr.ParseRule(`@@||example.com^$all`, nil); err == nil {
+			t.Error("expected @@$all to be rejected at parse time (docs 1453-1457)")
 		}
 
 		headers := http.Header{"Sec-Fetch-Dest": []string{"script"}}
 		_, shouldBlock, _ := nr.ModifyReq(newTestRequest(t, "https://example.com/script.js", headers))
-		if shouldBlock {
-			t.Fatal("expected all exception to cancel non-document primary rule")
+		if !shouldBlock {
+			t.Fatal("expected script primary rule to keep blocking after the exception is rejected")
 		}
 	})
 

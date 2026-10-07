@@ -248,6 +248,27 @@ func (t *Tree[T]) GetLP(url string) []T {
 	return result
 }
 
+// Walk calls fn for every value stored in the tree — under all three roots,
+// in no particular order (2026-10-08 B6). The same Insert/Compact exclusion
+// applies: Walk must not run concurrently with Insert.
+func (t *Tree[T]) Walk(fn func(T)) {
+	t.insertMu.Lock()
+	defer t.insertMu.Unlock()
+
+	var rec func(*node[T])
+	rec = func(n *node[T]) {
+		for _, v := range n.leaf {
+			fn(v)
+		}
+		for _, e := range n.edges {
+			rec(e.node)
+		}
+	}
+	rec(t.root)
+	rec(t.domainBoundaryRoot)
+	rec(t.anchorRoot)
+}
+
 func longestPrefix(a, b []token) int {
 	maxLen := len(a)
 	if l := len(b); l < maxLen {

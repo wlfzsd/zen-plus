@@ -12,6 +12,7 @@ import (
 	"github.com/irbis-sh/zen-desktop/internal/asset/jsrule"
 	"github.com/irbis-sh/zen-desktop/internal/asset/scriptlet"
 	"github.com/irbis-sh/zen-desktop/internal/csp"
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/httprewrite"
 )
 
@@ -105,30 +106,63 @@ func (e *Engine) AddRule(rule string, filterListTrusted bool) (handled bool, err
 }
 
 // Inject appends asset tags for the matching hostname into HTML responses.
-func (e *Engine) Inject(_ *http.Request, res *http.Response) error {
-	scriptletsNonce := csp.NewNonce()
-	jsRuleNonce := csp.NewNonce()
-	extendedCSSNonce := csp.NewNonce()
-	cosmeticCSSNonce := csp.NewNonce()
-	cssRuleNonce := csp.NewNonce()
-
-	operations := []csp.PatchOperation{
-		{Nonce: scriptletsNonce, Kind: csp.Script, ResourceURL: e.scriptletsURL},
-		{Nonce: jsRuleNonce, Kind: csp.Script, ResourceURL: e.jsRuleURL},
-		{Nonce: extendedCSSNonce, Kind: csp.Script, ResourceURL: e.extendedCSSURL},
-		{Nonce: cosmeticCSSNonce, Kind: csp.Style, ResourceURL: e.cosmeticCSSURL},
-		{Nonce: cssRuleNonce, Kind: csp.Style, ResourceURL: e.cssRuleCSSURL},
+//
+// 2026-10-08 (B2): ex optionally carries the exception-modifier exemptions
+// resolved for this document by NetworkRules.ActiveExceptions (AdGuard
+// $elemhide/$generichide/$specifichide/$jsinject and the cosmetic/js
+// components of $document; see internal/exemption). The zero value keeps
+// the exact pre-B2 behavior. With an exemption, fully exempted asset tags
+// are not injected at all, and the surviving asset URLs carry the exemption
+// as the ex query parameter so the later asset fetch serves filtered
+// content for the same page (the browser fetches assets after injection).
+func (e *Engine) Inject(_ *http.Request, res *http.Response, ex ...exemption.Exemption) error {
+	var exv exemption.Exemption
+	if len(ex) > 0 {
+		exv = ex[0]
 	}
+	exQuery := exv.QueryValue()
+
+	var operations []csp.PatchOperation
+	var injection bytes.Buffer
+
+	if !exv.Jsinject {
+		scriptletsNonce := csp.NewNonce()
+		jsRuleNonce := csp.NewNonce()
+		scriptletsURL := withExemptionQuery(e.scriptletsURL, exQuery)
+		jsRuleURL := withExemptionQuery(e.jsRuleURL, exQuery)
+		operations = append(operations,
+			csp.PatchOperation{Nonce: scriptletsNonce, Kind: csp.Script, ResourceURL: scriptletsURL},
+			csp.PatchOperation{Nonce: jsRuleNonce, Kind: csp.Script, ResourceURL: jsRuleURL},
+		)
+		injection.WriteString(scriptTag(scriptletsURL, scriptletsNonce))
+		injection.WriteString(scriptTag(jsRuleURL, jsRuleNonce))
+	}
+	if !exv.Elemhide {
+		extendedCSSNonce := csp.NewNonce()
+		cosmeticCSSNonce := csp.NewNonce()
+		cssRuleNonce := csp.NewNonce()
+		extendedCSSURL := withExemptionQuery(e.extendedCSSURL, exQuery)
+		cosmeticCSSURL := withExemptionQuery(e.cosmeticCSSURL, exQuery)
+		cssRuleURL := withExemptionQuery(e.cssRuleCSSURL, exQuery)
+		operations = append(operations,
+			csp.PatchOperation{Nonce: extendedCSSNonce, Kind: csp.Script, ResourceURL: extendedCSSURL},
+			csp.PatchOperation{Nonce: cosmeticCSSNonce, Kind: csp.Style, ResourceURL: cosmeticCSSURL},
+			csp.PatchOperation{Nonce: cssRuleNonce, Kind: csp.Style, ResourceURL: cssRuleURL},
+		)
+		injection.WriteString(scriptTag(extendedCSSURL, extendedCSSNonce))
+		injection.WriteString(styleTag(cosmeticCSSURL, cosmeticCSSNonce))
+		injection.WriteString(styleTag(cssRuleURL, cssRuleNonce))
+	}
+
+	if len(operations) == 0 {
+		// elemhide+jsinject (e.g. $document/$elemhide,$jsinject): nothing
+		// injects at all.
+		return nil
+	}
+
 	if err := csp.PatchHeadersBatch(res, operations); err != nil {
 		return fmt.Errorf("patch CSP headers: %w", err)
 	}
-
-	var injection bytes.Buffer
-	injection.WriteString(scriptTag(e.scriptletsURL, scriptletsNonce))
-	injection.WriteString(scriptTag(e.jsRuleURL, jsRuleNonce))
-	injection.WriteString(scriptTag(e.extendedCSSURL, extendedCSSNonce))
-	injection.WriteString(styleTag(e.cosmeticCSSURL, cosmeticCSSNonce))
-	injection.WriteString(styleTag(e.cssRuleCSSURL, cssRuleNonce))
 
 	if err := httprewrite.AppendHTMLHeadContents(res, injection.Bytes()); err != nil {
 		return fmt.Errorf("append head contents: %w", err)
@@ -137,27 +171,39 @@ func (e *Engine) Inject(_ *http.Request, res *http.Response) error {
 	return nil
 }
 
-// assetBytes returns the asset content for a hostname and asset path.
-func (e *Engine) assetBytes(hostname, path string) ([]byte, error) {
+// withExemptionQuery appends the exemption query parameter to an asset URL.
+// Without an exemption the URL is returned unchanged (byte-identical to
+// pre-B2). 2026-10-08 (B2).
+func withExemptionQuery(u, exQuery string) string {
+	if exQuery == "" {
+		return u
+	}
+	return u + "?" + exemption.QueryKey + "=" + exQuery
+}
+
+// assetBytes returns the asset content for a hostname and asset path, with
+// the page's exemption (decoded from the asset URL's ex query parameter by
+// the asset Handler) applied to rule selection. 2026-10-08 (B2).
+func (e *Engine) assetBytes(hostname, path string, ex exemption.Exemption) ([]byte, error) {
 	switch path {
 	case cosmeticCSSPath:
-		return e.cosmetic.GetAsset(hostname), nil
+		return e.cosmetic.GetAsset(hostname, ex), nil
 	case cssRulePath:
-		return e.cssRules.GetAsset(hostname), nil
+		return e.cssRules.GetAsset(hostname, ex), nil
 	case scriptletsPath:
-		body, err := e.scriptlets.GetAsset(hostname)
+		body, err := e.scriptlets.GetAsset(hostname, ex)
 		if err != nil {
 			return nil, fmt.Errorf("scriptlets asset: %w", err)
 		}
 		return body, nil
 	case extendedCSSPath:
-		body, err := e.extendedCSS.GetAsset(hostname)
+		body, err := e.extendedCSS.GetAsset(hostname, ex)
 		if err != nil {
 			return nil, fmt.Errorf("extended CSS asset: %w", err)
 		}
 		return body, nil
 	case jsRulePath:
-		body, err := e.jsRules.GetAsset(hostname)
+		body, err := e.jsRules.GetAsset(hostname, ex)
 		if err != nil {
 			return nil, fmt.Errorf("js rules: %w", err)
 		}

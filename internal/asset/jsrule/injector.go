@@ -6,6 +6,7 @@ import (
 	"log"
 	"regexp"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/hostmatch"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
 )
@@ -54,7 +55,13 @@ func (inj *Injector) AddRule(rule string) error {
 }
 
 // GetAsset returns the JS asset for the given hostname.
-func (inj *Injector) GetAsset(hostname string) ([]byte, error) {
+//
+// 2026-10-08 (B2): the $jsinject exemption (and the jsinject component of
+// $document) clears all js rules.
+func (inj *Injector) GetAsset(hostname string, ex ...exemption.Exemption) ([]byte, error) {
+	if len(ex) > 0 && ex[0].Jsinject {
+		return nil, nil
+	}
 	scripts := inj.store.Get(hostname)
 	log.Printf("got %d js rules for %q", len(scripts), redacted.Redacted(hostname))
 	if len(scripts) == 0 {

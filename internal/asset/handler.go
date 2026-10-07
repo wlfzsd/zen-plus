@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
 )
 
@@ -64,7 +65,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := h.engine.assetBytes(refererURL.Hostname(), r.URL.Path)
+	// 2026-10-08 (B2): the exemption (AdGuard $elemhide/$generichide/
+	// $specifichide/$jsinject family) travels from Engine.Inject as the ex
+	// query parameter on the asset URL; absent means no exemption and keeps
+	// the pre-B2 behavior.
+	ex := exemption.FromQueryValue(r.URL.Query().Get(exemption.QueryKey))
+	body, err := h.engine.assetBytes(refererURL.Hostname(), r.URL.Path, ex)
 	if err != nil {
 		log.Printf("asset: failed to resolve asset %q: %v", r.URL.Path, err)
 		http.Error(w, "asset resolution error", http.StatusInternalServerError)

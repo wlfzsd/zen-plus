@@ -1,9 +1,11 @@
 package networkrules
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/exceptionrule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
@@ -54,16 +56,53 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 		}
 
 		pattern, modifiers := parseRuleParts(rawRule[2:])
+		if err := validateDenyAllowPattern(pattern, modifiers); err != nil {
+			return false, err
+		}
 		if modifiers != nil {
+			// 2026-10-08 (B1): AdGuard restriction on the $all modifier:
+			// "This modifier cannot be used as an exception with the @@ mark"
+			// (create-own-filters doc, $all Restrictions). Previously @@$all
+			// was accepted as a full-cancel exception.
+			if err := checkExceptionModifiers(modifiers); err != nil {
+				return false, fmt.Errorf("parse modifiers: %v", err)
+			}
 			if err := r.ParseModifiers(modifiers); err != nil {
 				return false, fmt.Errorf("parse modifiers: %v", err)
 			}
+		}
+		// $badfilter exception rules are collected instead of inserted
+		// (2026-10-08 B6); they disable exception rules by exact text
+		// match in Compact, after every list was loaded (doc 1482:
+		// "@@||example.com$badfilter disables @@||example.com").
+		// Parity check for exception path: RawRule keeps the '@@' prefix
+		// while parseRuleParts strips it (it operates on rawRule[2:]), so
+		// the collected text must re-attach '@@' — the full-text
+		// comparison runs against stored RawRules.
+		if r.Badfilter {
+			nr.addBadfilter("@@"+pattern, modifiers)
+			return true, nil
 		}
 		if err := nr.exceptionStore.Insert(pattern, r); err != nil {
 			return false, fmt.Errorf("insert exception rule: %w", err)
 		}
 
+		// 2026-10-08 (B2): track exceptions whose effects reach the whole
+		// page so ModifyReq/ModifyRes can skip the Referer lookup when no
+		// such exception exists.
+		if r.Document || r.URLBlock || r.Genericblock || r.Content {
+			nr.pageScopedExceptions.Add(1)
+		}
+
 		return true, nil
+	}
+
+	// AdGuard: "Rules shorter than 4 characters are considered incorrect
+	// and will be ignored" (doc lines 285-289; 2026-10-08 B6). Hosts lines
+	// and exception rules are handled above and keep their behavior; the
+	// boundary is exact (4 characters are accepted, fewer are not).
+	if utf8.RuneCountInString(rawRule) < 4 {
+		return false, fmt.Errorf("rule shorter than 4 characters: %q", rawRule)
 	}
 
 	r := &rule.Rule{
@@ -72,16 +111,56 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 	}
 
 	pattern, modifiers := parseRuleParts(rawRule)
+	if err := validateDenyAllowPattern(pattern, modifiers); err != nil {
+		return false, err
+	}
 	if modifiers != nil {
 		if err := r.ParseModifiers(modifiers); err != nil {
 			return false, fmt.Errorf("parse modifiers: %v", err)
 		}
+	}
+	// $badfilter rules are collected instead of inserted (2026-10-08 B6):
+	// they never block by themselves and are applied once, post-load, in
+	// Compact (a badfilter rule may precede its target in load order).
+	if r.Badfilter {
+		nr.addBadfilter(pattern, modifiers)
+		return false, nil
 	}
 	if err := nr.primaryStore.Insert(pattern, r); err != nil {
 		return false, fmt.Errorf("insert rule: %w", err)
 	}
 
 	return false, nil
+}
+
+// checkExceptionModifiers rejects modifiers that AdGuard forbids in
+// exception rules: "$all cannot be used as an exception with the @@ mark"
+// (create-own-filters doc, $all modifier Restrictions). 2026-10-08 (B1).
+func checkExceptionModifiers(modifiers []string) error {
+	for _, m := range modifiers {
+		if m == "all" {
+			return errors.New(`$all cannot be used as an exception`)
+		}
+	}
+	return nil
+}
+
+// validateDenyAllowPattern enforces the $denyallow restriction that the
+// rule's matching pattern cannot target specific domains, e.g. it cannot
+// start with "||" (AdGuard docs §$denyallow, lines 509-515; rules
+// violating it are considered invalid). (2026-10-08, B5)
+func validateDenyAllowPattern(pattern string, modifiers []string) error {
+	if !strings.HasPrefix(pattern, "||") {
+		return nil
+	}
+	for _, m := range modifiers {
+		name, _, _ := strings.Cut(m, "=")
+		name = strings.TrimPrefix(name, "~")
+		if name == "denyallow" {
+			return errors.New("denyallow modifier cannot be used in a pattern-targeted rule")
+		}
+	}
+	return nil
 }
 
 // parseRuleParts splits rawRule into its pattern and modifier list.

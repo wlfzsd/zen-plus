@@ -74,6 +74,54 @@ func BufferRewrite(res *http.Response, processor func(src []byte) []byte) error 
 	return nil
 }
 
+// BufferRewriteLimited behaves like BufferRewrite but skips the transformation
+// when the decoded body is larger than limit bytes: overLimit reports true and
+// the response body is passed through unchanged (already decompressed and
+// decoded to UTF-8, chunked since the final length is unknown).
+//
+// Used by $replace, whose documented semantics skip responses larger than
+// 10 MB; buffering such bodies whole just to leave them untouched would be
+// wasteful. 2026-10-08 (batch B8).
+func BufferRewriteLimited(res *http.Response, limit int64, processor func(src []byte) []byte) (overLimit bool, err error) {
+	rawBodyReader, mimeType, err := getRawBodyReader(res)
+	if err != nil {
+		return false, fmt.Errorf("get raw body reader: %v", err)
+	}
+
+	lr := io.LimitedReader{R: rawBodyReader, N: limit + 1}
+	head, err := io.ReadAll(&lr)
+	if err != nil {
+		rawBodyReader.Close()
+		return false, fmt.Errorf("read body: %v", err)
+	}
+
+	if int64(len(head)) > limit {
+		// Over the limit: stream the already-buffered head plus the rest of
+		// the decoded body through unchanged. rawBodyReader's Close closes
+		// the decompressor and the original body once the client is done.
+		res.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), rawBodyReader), rawBodyReader}
+		res.ContentLength = -1
+		res.Header.Del("Content-Length")
+		res.Header.Del("Content-Encoding")
+		res.TransferEncoding = []string{"chunked"}
+		res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+		return true, nil
+	}
+
+	processedBody := processor(head)
+
+	res.Body = io.NopCloser(bytes.NewReader(processedBody))
+	res.ContentLength = int64(len(processedBody))
+	res.Header.Set("Content-Length", fmt.Sprint(len(processedBody)))
+	res.TransferEncoding = nil
+	res.Header.Del("Content-Encoding")
+	res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+	return false, nil
+}
+
 // getRawBodyReader extracts an uncompressed, UTF-8 decoded body from a potentially compressed and non-UTF-8 encoded HTTP response.
 func getRawBodyReader(res *http.Response) (body io.ReadCloser, mimeType string, err error) {
 	encoding := res.Header.Get("Content-Encoding")

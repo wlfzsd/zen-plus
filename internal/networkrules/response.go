@@ -27,6 +27,9 @@ type BlockInfo struct {
 	Rule          string
 	FilterList    string
 	WhitelistPort int
+	// Popup marks a block produced by a $popup rule: the blocking page then
+	// tries window.close() to dismiss the popup tab. 2026-10-08 (B1).
+	Popup bool
 }
 
 //go:embed blockpage.html
@@ -36,6 +39,7 @@ var blockTmpl = template.Must(template.New("block").Parse(blockPageTpl))
 
 func (nr *NetworkRules) CreateBlockPageResponse(req *http.Request, appliedRules []rule.Rule, whitelistPort int) (*http.Response, error) {
 	var rawRule, filterList string
+	var popup bool
 	if len(appliedRules) > 0 {
 		// ModifyReq currently returns at most one rule when shouldBlock is true.
 		// If this changes in the future, this logic may need to be updated.
@@ -44,6 +48,7 @@ func (nr *NetworkRules) CreateBlockPageResponse(req *http.Request, appliedRules 
 		if r.FilterName != nil {
 			filterList = *r.FilterName
 		}
+		popup = r.Popup
 	}
 
 	var buf bytes.Buffer
@@ -52,6 +57,7 @@ func (nr *NetworkRules) CreateBlockPageResponse(req *http.Request, appliedRules 
 		Rule:          rawRule,
 		FilterList:    filterList,
 		WhitelistPort: whitelistPort,
+		Popup:         popup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("parse html template: %w", err)

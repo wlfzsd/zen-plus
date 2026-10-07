@@ -1,8 +1,10 @@
 package rulemodifiers
 
 import (
-	"net/url"
+	"io"
+	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -94,31 +96,69 @@ func TestRemoveParamModifier(t *testing.T) {
 			},
 		}
 
+		// 2026-10-08 (B7): ModifyQuery takes the whole request, matches the
+		// encoded RawQuery text in place and applies the method whitelist
+		// (GET/HEAD/OPTIONS + bodyless POST). For unreserved-ASCII queries
+		// the expected URLs equal the pre-B7 decoded-mode results, so the
+		// table below keeps the original expectations.
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
 
-				u, err := url.Parse(tt.url)
+				req, err := http.NewRequest(http.MethodGet, tt.url, nil)
 				if err != nil {
-					t.Fatalf("parse URL %q: %v", tt.url, err)
+					t.Fatalf("build request for %q: %v", tt.url, err)
 				}
 
-				q := u.Query()
-
-				modified := tt.modifier.ModifyQuery(q)
+				modified := tt.modifier.ModifyQuery(req)
 				if modified != tt.modified {
-					t.Errorf("ModifyReq() modified = %v, want %v", modified, tt.modified)
+					t.Errorf("ModifyQuery() modified = %v, want %v", modified, tt.modified)
 				}
 
-				if modified {
-					u.RawQuery = q.Encode()
-				}
-
-				got := u.String()
+				got := req.URL.String()
 				if got != tt.want {
-					t.Errorf("ModifyReq() got URL = %v, want %v", got, tt.want)
+					t.Errorf("ModifyQuery() got URL = %v, want %v", got, tt.want)
 				}
 			})
+		}
+	})
+
+	// 2026-10-08 (B7): the method whitelist (AdGuard doc 2634) — $removeparam
+	// applies to GET/HEAD/OPTIONS and bodyless POST only.
+	t.Run("method whitelist", func(t *testing.T) {
+		t.Parallel()
+
+		var rm RemoveParamModifier
+		if err := rm.Parse("removeparam=id"); err != nil {
+			t.Fatalf("parse modifier: %v", err)
+		}
+
+		mustReq := func(method, rawURL string, body string) *http.Request {
+			t.Helper()
+			req, err := http.NewRequest(method, rawURL, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			if body != "" {
+				req.Body = io.NopCloser(strings.NewReader(body))
+				req.ContentLength = int64(len(body))
+			}
+			return req
+		}
+
+		put := mustReq(http.MethodPut, "https://example.com/?id=1", "")
+		if rm.ModifyQuery(put) {
+			t.Error("PUT request must not be modified (doc 2634)")
+		}
+
+		bodylessPost := mustReq(http.MethodPost, "https://example.com/?id=1", "")
+		if !rm.ModifyQuery(bodylessPost) {
+			t.Error("bodyless POST request should be modified (doc 2634 sometimes-POST)")
+		}
+
+		postWithBody := mustReq(http.MethodPost, "https://example.com/?id=1", "body")
+		if rm.ModifyQuery(postWithBody) {
+			t.Error("POST with a body must not be modified (doc 2634)")
 		}
 	})
 

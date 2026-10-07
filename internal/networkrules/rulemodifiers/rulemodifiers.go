@@ -2,7 +2,6 @@ package rulemodifiers
 
 import (
 	"net/http"
-	"net/url"
 )
 
 // Modifier is a Modifier of a rule.
@@ -27,7 +26,14 @@ type ActionModifier interface {
 
 // QueryModifier modifies request query parameters.
 // According to terminology, they are also "action modifiers", but are implemented separately for performance reasons.
+//
+// 2026-10-08 (B7): ModifyQuery receives the whole request instead of a
+// decoded url.Values map. The request provides the method context needed by
+// the AdGuard $removeparam method whitelist (doc 2634: GET/HEAD/OPTIONS and
+// bodyless POST only), and lets the modifier rewrite req.URL.RawQuery
+// directly in encoded form (doc 2650-2656), preserving the order and
+// encoding of untouched pairs.
 type QueryModifier interface {
 	Modifier
-	ModifyQuery(url.Values) bool
+	ModifyQuery(req *http.Request) bool
 }

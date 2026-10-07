@@ -21,11 +21,76 @@ var (
 )
 
 type DomainModifier struct {
-	entries  []domainModifierEntry
-	inverted bool
+	entries []domainModifierEntry
+
+	// MatchTargetDomain enables the AdGuard "$domain modifier matching
+	// target domain" behavior (docs §$domain, lines 566-585): when the
+	// host rule carries $cookie, $csp, $permissions or $removeparam, the
+	// modifier also matches the request's target hostname instead of only
+	// the referrer. rule.ParseModifiers sets it after the whole rule is
+	// parsed, because $domain may precede the linking modifier in the
+	// rule text.
+	//
+	// It is deliberately NOT compared by Cancels: the flag derives from
+	// the rule's other modifiers, and exception-vs-rule cancellation is
+	// already gated per request by ShouldMatchReq, so comparing it would
+	// needlessly break subset exceptions. (2026-10-08, B5)
+	MatchTargetDomain bool
 }
 
 var _ ConditionModifier = (*DomainModifier)(nil)
+
+// Inverted reports whether the modifier's value consists of negated domain
+// entries (2026-10-08 B6). Used by $badfilter partial disablement, which is
+// only allowed for non-negated $domain values (doc 1487-1488, 1499).
+// 2026-10-08 (merge): under B5's per-entry negation a value may mix
+// positive and negated entries; any negated entry makes the value negative
+// in the doc-1499 sense, so it opts out of partial disablement — the same
+// outcome B6's sandbox produced, where a mixed value failed to parse.
+func (m *DomainModifier) Inverted() bool {
+	for i := range m.entries {
+		if m.entries[i].inverted {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchHost reports whether any stored domain entry matches host (2026-10-08
+// B6). It reuses the exact entry matching of ShouldMatchReq — regular
+// entries match the host itself or any of its subdomains, "example.*"
+// entries match by effective TLD, regexp entries by regexp — without the
+// referer fallback. Used by $badfilter partial disablement.
+func (m *DomainModifier) MatchHost(host string) bool {
+	for _, entry := range m.entries {
+		if entry.MatchDomain(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// RefererHostname returns the hostname of the referer URL (cached). ok is
+// false when url.Parse rejected the string. Exported for the $badfilter
+// partial-disablement check, which selects the effective domain the same
+// way DomainModifier.ShouldMatchReq does (2026-10-08 B6).
+func RefererHostname(referer string) (host string, ok bool) {
+	return refererHostname(referer)
+}
+
+// HasPermittedDomains reports whether the modifier positively permits any
+// domain. Under the AdGuard generic-rule definition (docs lines 1316-1339)
+// a rule limited only by negated domains ($domain=~example.com) is still
+// generic. 2026-10-08 (B2). 2026-10-08 (merge): expressed over B5's
+// per-entry negation — at least one non-negated entry.
+func (m *DomainModifier) HasPermittedDomains() bool {
+	for i := range m.entries {
+		if !m.entries[i].inverted {
+			return true
+		}
+	}
+	return false
+}
 
 func (m *DomainModifier) Parse(modifier string) error {
 	eqIndex := strings.IndexByte(modifier, '=')
@@ -34,19 +99,19 @@ func (m *DomainModifier) Parse(modifier string) error {
 	}
 	value := modifier[eqIndex+1:]
 
-	m.inverted = strings.HasPrefix(value, "~")
+	// Every entry carries its own negation (AdGuard docs §$domain syntax
+	// and "and negation ~" examples, lines 533-564): e.g.
+	// $domain=example.org|~foo.example.org or $domain=~a.com|~b.com|~/re/.
+	// (2026-10-08, B5)
 	matches := domainModifierRegex.FindAllString(value, -1)
 	m.entries = make([]domainModifierEntry, len(matches))
 	for i, entry := range matches {
 		inverted := len(entry) > 0 && entry[0] == '~'
-		if inverted != m.inverted {
-			return errors.New("cannot mix inverted and non-inverted method modifiers")
-		}
 		if inverted {
 			entry = entry[1:]
 		}
 
-		m.entries[i] = domainModifierEntry{}
+		m.entries[i] = domainModifierEntry{inverted: inverted}
 		if err := m.entries[i].Parse(entry); err != nil {
 			return fmt.Errorf("parse entry %q: %w", entry, err)
 		}
@@ -99,30 +164,67 @@ func refererHostname(referer string) (host string, ok bool) {
 }
 
 func (m *DomainModifier) ShouldMatchReq(req *http.Request) bool {
-	var hostname string
 	referer := req.Header.Get("Referer")
+	var refHostname string
 	// Allow empty "Referer" header to make inverted rules work.
 	if referer != "" {
 		host, ok := refererHostname(referer)
 		if !ok {
 			return false
 		}
-		hostname = host
+		refHostname = host
 	} else {
-		hostname = req.URL.Hostname()
+		refHostname = req.URL.Hostname()
 	}
 
-	matches := false
-	for _, entry := range m.entries {
-		if entry.MatchDomain(hostname) {
-			matches = true
-			break
+	if m.MatchTargetDomain {
+		// The rule carries $cookie/$csp/$permissions/$removeparam: the
+		// modifier also matches the target hostname, but a referrer that
+		// is explicitly excluded by a negated entry vetoes the rule
+		// (AdGuard docs §$domain, lines 570-585). (2026-10-08, B5)
+		if m.matchRestricted(refHostname) {
+			return false
+		}
+		return m.matchHost(refHostname) || m.matchHost(req.URL.Hostname())
+	}
+
+	return m.matchHost(refHostname)
+}
+
+// matchHost reports whether hostname satisfies the modifier's entry list:
+// no negated entry may hit, and at least one non-negated entry must hit —
+// vacuously true when the list holds only negated entries ("any domain
+// except ..."). This is AdGuard's per-entry negation semantics; negated
+// entries always win, so a positive hit does not end the scan — later
+// negated entries can still veto. (2026-10-08, B5)
+func (m *DomainModifier) matchHost(hostname string) bool {
+	hasPermitted := false
+	permitted := false
+	for i := range m.entries {
+		e := &m.entries[i]
+		if e.inverted {
+			if e.MatchDomain(hostname) {
+				return false
+			}
+			continue
+		}
+		hasPermitted = true
+		if !permitted && e.MatchDomain(hostname) {
+			permitted = true
 		}
 	}
-	if m.inverted {
-		return !matches
+	return permitted || !hasPermitted
+}
+
+// matchRestricted reports whether any negated entry hits hostname, i.e.
+// the hostname is explicitly excluded by the modifier. (2026-10-08, B5)
+func (m *DomainModifier) matchRestricted(hostname string) bool {
+	for i := range m.entries {
+		if m.entries[i].inverted && m.entries[i].MatchDomain(hostname) {
+			return true
+		}
 	}
-	return matches
+	return false
 }
 
 func (m *DomainModifier) ShouldMatchRes(_ *http.Response) bool {
@@ -133,6 +235,8 @@ type domainModifierEntry struct {
 	regular string
 	tld     string
 	regexp  *regexp.Regexp
+	// inverted marks a negated ("~"-prefixed) entry. (2026-10-08, B5)
+	inverted bool
 }
 
 func (m *domainModifierEntry) Parse(entry string) error {
@@ -223,7 +327,9 @@ func (m *domainModifierEntry) MatchDomain(domain string) bool {
 
 func (m *DomainModifier) Cancels(modifier Modifier) bool {
 	other, ok := modifier.(*DomainModifier)
-	if !ok || len(m.entries) != len(other.entries) || m.inverted != other.inverted {
+	// Entry-level negation is compared inside entryEqual, replacing the
+	// former modifier-level m.inverted check. (2026-10-08, B5)
+	if !ok || len(m.entries) != len(other.entries) {
 		return false
 	}
 
@@ -250,7 +356,7 @@ func (m *DomainModifier) Cancels(modifier Modifier) bool {
 }
 
 func entryEqual(a, b domainModifierEntry) bool {
-	if a.regular != b.regular || a.tld != b.tld {
+	if a.inverted != b.inverted || a.regular != b.regular || a.tld != b.tld {
 		return false
 	}
 

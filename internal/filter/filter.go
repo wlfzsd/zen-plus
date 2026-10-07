@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/fetchmeta"
 	"github.com/irbis-sh/zen-desktop/internal/filterliststore"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
@@ -37,6 +38,10 @@ type networkRules interface {
 	ParseRule(rule string, filterName *string) (isException bool, err error)
 	ModifyReq(req *http.Request) (appliedRules []rule.Rule, shouldBlock bool, redirectURL string)
 	ModifyRes(req *http.Request, res *http.Response) ([]rule.Rule, error)
+	// ActiveExceptions resolves the exception-modifier exemptions for a
+	// document request ($elemhide/$generichide/$specifichide/$jsinject and
+	// the cosmetic/js components of $document). 2026-10-08 (B2).
+	ActiveExceptions(req *http.Request) exemption.Exemption
 	CreateBlockResponse(req *http.Request) *http.Response
 	CreateRedirectResponse(req *http.Request, to string) *http.Response
 	CreateBlockPageResponse(req *http.Request, appliedRules []rule.Rule, whitelistPort int) (*http.Response, error)
@@ -46,7 +51,10 @@ type networkRules interface {
 // documentInjector handles non-network rules and HTML injection.
 type documentInjector interface {
 	AddRule(rule string, filterListTrusted bool) (handled bool, err error)
-	Inject(*http.Request, *http.Response) error
+	// 2026-10-08 (B2): Inject accepts the exception-modifier exemptions
+	// resolved by NetworkRules.ActiveExceptions (zero value = no exemption,
+	// pre-B2 behavior).
+	Inject(*http.Request, *http.Response, ...exemption.Exemption) error
 }
 
 type whitelistSrv interface {
@@ -424,7 +432,14 @@ func (f *Filter) Finalize() {
 // For that reason, this method does not return a blocking or redirecting response itself.
 func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processInfo process.Info) error {
 	if isDocumentNavigation(req, res) {
-		if err := f.injector.Inject(req, res); err != nil {
+		// 2026-10-08 (B2): resolve the exception-modifier exemptions for
+		// this document (AdGuard $elemhide/$generichide/$specifichide/
+		// $jsinject and the cosmetic/js components of $document) and pass
+		// them to the injector. ActiveExceptions is already gated to frame
+		// document loads (C5, docs 1119); isDocumentNavigation additionally
+		// requires an HTML response. The zero value keeps pre-B2 behavior.
+		ex := f.networkRules.ActiveExceptions(req)
+		if err := f.injector.Inject(req, res, ex); err != nil {
 			// This injection error is recoverable, so we log it and continue processing the response.
 			log.Printf("error injecting assets for %q: %v", redacted.Redacted(req.URL), err)
 		}

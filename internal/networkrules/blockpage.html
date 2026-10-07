@@ -38,5 +38,16 @@
         rule
       )}&returnTo=${returnTo}`;
     </script>
+    {{ if .Popup }}
+    <!-- 2026-10-08 (B1): $popup semantics (AdGuard CoreLibs): the blocking
+         page itself tries to close the popup tab. window.close() only
+         succeeds for script-opened windows; otherwise this page stays
+         visible and the user can use "Go back". -->
+    <script>
+      try {
+        window.close();
+      } catch (e) {}
+    </script>
+    {{ end }}
   </body>
 </html>
