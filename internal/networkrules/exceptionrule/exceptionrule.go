@@ -340,3 +340,48 @@ func (er *ExceptionRule) ShouldMatchReq(req *http.Request) bool {
 func (er *ExceptionRule) ShouldMatchRes(res *http.Response) bool {
 	return er.ModifiersMatchRes(res)
 }
+
+// CancelsNothingOnReq reports whether the exception — already matched to the
+// request by URL pattern and condition modifiers — can never cancel any
+// network rule on the request path, i.e. Cancels(r, req, false) ≡ false for
+// every rule r. True exactly when the exception's only scoped effects belong
+// to the asset-exemption family ($elemhide/$generichide/$specifichide/
+// $jsinject/$content/$extension/$stealth) with no $document/$all/$popup/
+// $urlblock/$genericblock flag, no action/query modifiers, and it is not a
+// bare whitelist: in Cancels such an exception always reaches the scoped
+// branch and returns er.Popup (false). Read-only hot-path classifier
+// (2026-10-08 perf audit ②); semantics must stay in lockstep with Cancels.
+func (er *ExceptionRule) CancelsNothingOnReq() bool {
+	if er.Document || er.All || er.Popup || er.URLBlock || er.Genericblock || er.IsBare() {
+		return false
+	}
+	if len(er.ActionModifiers()) > 0 || len(er.QueryModifiers()) > 0 {
+		return false
+	}
+	return er.Elemhide || er.Generichide || er.Specifichide || er.Jsinject ||
+		er.Content || er.Extension || er.Stealth
+}
+
+// CancelsEverythingOnReq reports whether the exception — already matched to
+// the request — cancels every candidate rule except for the two documented
+// vetoes that the caller must still evaluate per rule: (1) $important rules
+// survive a non-$important exception (docs 670-679), and (2) a bare
+// whitelist without $important does not disable rules carrying query
+// modifiers (B7 carve-out, doc 2737). True exactly for @@$all without
+// action/query mods (docs 1119 exception), @@$document without action/query
+// mods (docs 919-923), bare whitelists, and pure condition-only exceptions
+// (H3 per-request whitelist). Read-only hot-path classifier (2026-10-08
+// perf audit ②); semantics must stay in lockstep with Cancels.
+func (er *ExceptionRule) CancelsEverythingOnReq() bool {
+	if len(er.ActionModifiers()) > 0 || len(er.QueryModifiers()) > 0 {
+		return false
+	}
+	if er.All || er.Document || er.IsBare() {
+		return true
+	}
+	// Pure condition-only exception (@@...$third-party, $script, ...):
+	// cancels every matched rule (H3).
+	return !er.Popup && !er.URLBlock && !er.Genericblock &&
+		!er.Elemhide && !er.Generichide && !er.Specifichide &&
+		!er.Jsinject && !er.Content && !er.Extension && !er.Stealth
+}

@@ -206,15 +206,77 @@ func logJSONPruneApplyFailure(raw string, err error) {
 	log.Printf("jsonprune %q: apply failed, response body left unchanged: %v", raw, err)
 }
 
+// [bound_audit 修复批 2026-10-08，发现①] jsonPruneMaxDepth 是 jsonprune 应用
+// 的 JSON 嵌套深度上限。口径对齐 Go 标准库 encoding/json 的
+// maxNestingDepth=10,000（go/src/encoding/json/scanner.go）：超出视为病态结构，
+// 拒绝应用。原因（bound_audit 发现①）：spyzhov/ajson 的 $.. 递归下降
+//（jsonpath.go recursiveChildren）与 Marshal（encode.go）都是无界递归，
+// 深嵌套 body 会触发 fatal error: stack overflow——不可 recover，代理进程
+// 整体死亡。深度门把恶意结构挡在一切 ajson 调用之前。
+const jsonPruneMaxDepth = 10_000
+
+// [bound_audit 修复批 2026-10-08，发现③] jsonPruneMaxBodySize 是 jsonprune
+// 缓冲改写的 body 上限，口径对齐 $replace 的 replaceMaxBodySize=10MB
+//（AdGuard 文档 2876）。超限体不经缓冲、原样流式透传。
+const jsonPruneMaxBodySize = 10 << 20
+
+// jsonPruneDepthExceeded 字节级扫描 src 的 {/[ 嵌套深度（跳过字符串字面量，
+// 转义感知；UTF-8 多字节均 ≥0x80，不会与 ASCII 定界符混淆），超过
+// jsonPruneMaxDepth 立即返回 true。单趟线性、O(1) 空间、超限提前退出。
+func jsonPruneDepthExceeded(src []byte) bool {
+	depth := 0
+	inStr, esc := false, false
+	for _, c := range src {
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+			if depth > jsonPruneMaxDepth {
+				return true
+			}
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 func (m *JSONPruneModifier) ModifyRes(res *http.Response) (modified bool, err error) {
 	if !isJSONResponse(res) {
 		return false, nil
 	}
 
 	var touched bool
-	err = httprewrite.BufferRewrite(res, func(src []byte) []byte {
+	// [bound_audit 修复批 2026-10-08，发现③] BufferRewrite →
+	// BufferRewriteLimited：与 $replace 同口径的 10MB 上限，超限体原样
+	// 流式透传（over-limit 时体未被改写，modified=false）。
+	_, err = httprewrite.BufferRewriteLimited(res, jsonPruneMaxBodySize, func(src []byte) []byte {
+		// [bound_audit 修复批 2026-10-08，发现①] 深度门：在任何 ajson
+		// 调用（含迭代安全的 Unmarshal）之前拒掉深嵌套结构。
+		if jsonPruneDepthExceeded(src) {
+			logJSONPruneApplyFailure(m.raw, fmt.Errorf("body nesting depth exceeds %d, response body left unchanged", jsonPruneMaxDepth))
+			return src
+		}
+
 		root, err := ajson.Unmarshal(src)
 		if err != nil {
+			// [bound_audit 修复批 2026-10-08，发现①] 解析失败纳入 P3
+			// 去重告警（原实现静默吞掉）。
+			logJSONPruneApplyFailure(m.raw, fmt.Errorf("unmarshal: %w", err))
 			return src
 		}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/exceptionrule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
 )
 
 type NetworkRules struct {
@@ -106,6 +107,12 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	initialURL := req.URL.String()
 
+	// 2026-10-08 (perf port): adapted to the perf-audit ① ModifyReqQuery
+	// signature — the query is pre-split into a per-request QueryState
+	// (nil when absent or method-ineligible) and the joined form is written
+	// back once via Finalize; released on every return path.
+	qs := rulemodifiers.AcquireQueryState(req)
+
 outer:
 	for _, r := range primaryRules {
 		for _, ex := range exceptions {
@@ -117,6 +124,9 @@ outer:
 			}
 		}
 		if r.ShouldBlockReq(req) {
+			if qs != nil {
+				rulemodifiers.ReleaseQueryState(qs)
+			}
 			return []rule.Rule{*r}, true, ""
 		}
 
@@ -125,8 +135,8 @@ outer:
 		// the whole request is passed and query modifiers rewrite
 		// req.URL.RawQuery in place; the old decoded url.Values round-trip
 		// (parse once, Encode back) is gone with it.
-		if req.URL.RawQuery != "" {
-			if r.ModifyReqQuery(req) {
+		if qs != nil {
+			if r.ModifyReqQuery(req, qs) {
 				modified = true
 			}
 		}
@@ -134,6 +144,13 @@ outer:
 		if modified {
 			appliedRules = append(appliedRules, *r)
 		}
+	}
+
+	if qs != nil {
+		if raw, changed := qs.Finalize(); changed {
+			req.URL.RawQuery = raw
+		}
+		rulemodifiers.ReleaseQueryState(qs)
 	}
 
 	finalURL := req.URL.String()

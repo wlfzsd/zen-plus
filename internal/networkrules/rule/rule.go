@@ -56,6 +56,14 @@ type Rule struct {
 	// unless a $badfilter rule targeted this rule (set in
 	// networkrules.Compact via applyBadfilters).
 	badfilterDisable *BadfilterDisable
+	// noConds marks rules parsed without any condition modifier (2026-10-08
+	// perf audit ③). ParseModifiers is the only writer of condMods, so a
+	// rule whose ParseModifiers left condMods nil has an empty And/Or set
+	// and ModifiersMatchReq reduces to the $badfilter check — the flag lets
+	// the request hot path skip the empty-slice evaluation entirely.
+	// Conservative by construction: rules that bypass ParseModifiers
+	// (hosts-derived rules) keep false and just take the regular path.
+	noConds bool
 }
 
 // BadfilterDisable describes how $badfilter rules disabled a rule after the
@@ -348,6 +356,10 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 		}
 	}
 
+	// Load-time noConditions flag (2026-10-08 perf audit ③): condMods is
+	// nil exactly when no condition modifier was parsed.
+	rm.noConds = rm.condMods == nil
+
 	return nil
 }
 
@@ -468,6 +480,13 @@ func (rm *Rule) ShouldMatchReq(req *http.Request) bool {
 // action/query modifiers) is admitted through either path.
 func (rm *Rule) ShouldMatchReqNav(req *http.Request, isUserNav bool) bool {
 	if isUserNav && !rm.Document && !rm.All && !rm.Popup {
+		// 2026-10-08 (perf audit ③): condition-free rewrite rules — the
+		// generic $removeparam family, 1763 of the 2310 generic rules in
+		// the live main6 lists — reduce to hasRewriteAction plus the
+		// $badfilter check; skip the (empty) modifier evaluation.
+		if rm.noConds {
+			return rm.hasRewriteAction() && !rm.badfilterDisabledFor(req)
+		}
 		return rm.hasRewriteAction() && rm.ModifiersMatchReq(req)
 	}
 
@@ -498,6 +517,12 @@ func (rm *Rule) ModifiersMatchReq(req *http.Request) bool {
 	// disablement covers exceptions as well (2026-10-08 merge).
 	if rm.badfilterDisabledFor(req) {
 		return false
+	}
+
+	// Condition-free rules (perf audit ③): the And/Or evaluation is
+	// vacuously true.
+	if rm.noConds {
+		return true
 	}
 
 	// AndModifiers: All must match.
@@ -536,6 +561,12 @@ func (rm *Rule) ModifiersMatchRes(res *http.Response) bool {
 		if rm.badfilterDisabledFor(res.Request) {
 			return false
 		}
+	}
+
+	// Condition-free rules (perf audit ③): the And/Or evaluation is
+	// vacuously true.
+	if rm.noConds {
+		return true
 	}
 
 	for _, m := range rm.AndConditionModifiers() {
@@ -592,14 +623,18 @@ func (rm *Rule) ModifyReq(req *http.Request) (modified bool) {
 	return modified
 }
 
-// ModifyReqQuery modifies a request query. Returns true if the query was modified.
+// ModifyReqQuery modifies the request query. Returns true if the query was modified.
 //
 // 2026-10-08 (B7): the whole request is passed so that query modifiers get
 // the method context (AdGuard doc 2634) and rewrite req.URL.RawQuery
 // directly in encoded form; the decoded url.Values round-trip is gone.
-func (rm *Rule) ModifyReqQuery(req *http.Request) (modified bool) {
+//
+// 2026-10-08 (perf audit ①): qs carries the request query pre-split into
+// segments once per ModifyReq pass; qs is nil when there is no query or the
+// method is not eligible, and every query modifier then returns false.
+func (rm *Rule) ModifyReqQuery(req *http.Request, qs *rulemodifiers.QueryState) (modified bool) {
 	for _, qm := range rm.QueryModifiers() {
-		if qm.ModifyQuery(req) {
+		if qm.ModifyQuery(req, qs) {
 			modified = true
 		}
 	}

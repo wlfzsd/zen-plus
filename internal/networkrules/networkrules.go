@@ -10,6 +10,7 @@ import (
 	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/exceptionrule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
 )
 
 type NetworkRules struct {
@@ -78,6 +79,49 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 		return er.ShouldMatchReq(req)
 	})
 
+	// 2026-10-08 (perf audit ②): classify the matched exceptions once
+	// instead of re-deriving the same answers per rule×exception pair.
+	//   - Exceptions that can never cancel a network rule on the request
+	//     path (the asset-exemption scoped family: $generichide & co) are
+	//     dropped from the sweep — Cancels(r, req, false) is false for every
+	//     rule, so dropping them is semantics-preserving.
+	//   - "Cancels-everything" exceptions ($all/$document/bare/pure
+	//     condition-only) are summarized into three flags so the rule loop
+	//     can skip wholesale, exactly reproducing which rules their
+	//     Cancels would have cancelled (see the per-rule predicate below).
+	//     The two remaining per-rule vetoes are $important rules (docs
+	//     670-679) and — for bare whitelists without $important — rules
+	//     carrying query modifiers (B7 carve-out, doc 2737).
+	var (
+		// wImp: a $important wholesale exception matched — cancels every
+		// candidate rule outright.
+		wImp bool
+		// wNorm: a non-$important wholesale exception matched — cancels
+		// every candidate rule except $important ones.
+		wNorm bool
+		// wNormAllBare: every non-$important wholesale exception is bare,
+		// so rules carrying query modifiers survive them (at least one
+		// non-bare wholesale exception would cancel those too).
+		wNormAllBare = true
+	)
+	keep := exceptions[:0]
+	for _, er := range exceptions {
+		if !er.CancelsNothingOnReq() {
+			keep = append(keep, er)
+		}
+		if er.CancelsEverythingOnReq() {
+			if er.Important {
+				wImp = true
+			} else {
+				wNorm = true
+				if !er.IsBare() {
+					wNormAllBare = false
+				}
+			}
+		}
+	}
+	exceptions = keep
+
 	// Exceptions matching the page (Referer) URL carry page-scoped effects
 	// only: $urlblock/$genericblock and the urlblock component of $document
 	// (docs 1292-1298, 919-923). zen is a system proxy without a frame tree,
@@ -87,9 +131,38 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	initialURL := req.URL.String()
 
+	// 2026-10-08 (perf audit ①): split the query once per request instead
+	// of once per candidate rule. qs is nil when there is no query or the
+	// method is outside the $removeparam whitelist — every query modifier
+	// would have returned false for those, so skipping the calls preserves
+	// outcomes. Released on every return path below.
+	var qs *rulemodifiers.QueryState
+	if req.URL.RawQuery != "" {
+		qs = rulemodifiers.AcquireQueryState(req)
+	}
+
 outer:
 	for _, r := range primaryRules {
+		// Wholesale cancellation (perf audit ②): mirrors "some matched
+		// exception's Cancels(r, req, false) is true for this rule" without
+		// the per-pair call. wImp covers every rule; a non-$important
+		// wholesale exception spares only $important rules, and when every
+		// such exception is bare, rules carrying query modifiers
+		// additionally survive them (B7 carve-out, doc 2737) — a single
+		// non-bare one ($all/$document/condition-only) cancels those too.
+		if wImp || (wNorm && !r.Important && (!wNormAllBare || len(r.QueryModifiers()) == 0)) {
+			continue outer
+		}
 		for _, ex := range exceptions {
+			// 2026-10-08 (perf audit ②): an action/query-scoped exception
+			// reaches only cancelsActionQueryStructural, which cannot cancel
+			// a rule carrying no modifiers of the same kind — skip the pair
+			// without the call. Exact: every earlier Cancels branch either
+			// already returned or falls through to the structural check.
+			if (len(ex.ActionModifiers()) > 0 && len(r.ActionModifiers()) == 0) ||
+				(len(ex.QueryModifiers()) > 0 && len(r.QueryModifiers()) == 0) {
+				continue
+			}
 			if ex.Cancels(r, req, false) {
 				continue outer
 			}
@@ -100,12 +173,15 @@ outer:
 			}
 		}
 		if r.ShouldBlockReq(req) {
+			if qs != nil {
+				rulemodifiers.ReleaseQueryState(qs)
+			}
 			return []rule.Rule{*r}, true, ""
 		}
 
 		modified := r.ModifyReq(req)
-		if req.URL.RawQuery != "" {
-			if r.ModifyReqQuery(req) {
+		if qs != nil {
+			if r.ModifyReqQuery(req, qs) {
 				modified = true
 			}
 		}
@@ -113,6 +189,17 @@ outer:
 		if modified {
 			appliedRules = append(appliedRules, *r)
 		}
+	}
+
+	if qs != nil {
+		// 2026-10-08 (perf audit ①): write the joined segments back once.
+		// B7's in-place encoded-form rewrite semantics (doc 2650-2656) are
+		// unchanged — each rule observed exactly the segments the previous
+		// per-rule split/join round-trip would have produced.
+		if raw, changed := qs.Finalize(); changed {
+			req.URL.RawQuery = raw
+		}
+		rulemodifiers.ReleaseQueryState(qs)
 	}
 
 	// 2026-10-08 (B7): query modifiers rewrite req.URL.RawQuery in place in

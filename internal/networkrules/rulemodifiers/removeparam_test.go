@@ -101,6 +101,10 @@ func TestRemoveParamModifier(t *testing.T) {
 		// (GET/HEAD/OPTIONS + bodyless POST). For unreserved-ASCII queries
 		// the expected URLs equal the pre-B7 decoded-mode results, so the
 		// table below keeps the original expectations.
+		// 2026-10-08 (perf audit ①): the query is pre-split into a
+		// per-request QueryState (AcquireQueryState) and the joined form is
+		// written back once via Finalize, mirroring the production wiring in
+		// networkrules.ModifyReq.
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -110,7 +114,14 @@ func TestRemoveParamModifier(t *testing.T) {
 					t.Fatalf("build request for %q: %v", tt.url, err)
 				}
 
-				modified := tt.modifier.ModifyQuery(req)
+				qs := AcquireQueryState(req)
+				modified := tt.modifier.ModifyQuery(req, qs)
+				if qs != nil {
+					if raw, changed := qs.Finalize(); changed {
+						req.URL.RawQuery = raw
+					}
+					ReleaseQueryState(qs)
+				}
 				if modified != tt.modified {
 					t.Errorf("ModifyQuery() modified = %v, want %v", modified, tt.modified)
 				}
@@ -147,17 +158,33 @@ func TestRemoveParamModifier(t *testing.T) {
 		}
 
 		put := mustReq(http.MethodPut, "https://example.com/?id=1", "")
-		if rm.ModifyQuery(put) {
+		bodylessPost := mustReq(http.MethodPost, "https://example.com/?id=1", "")
+		postWithBody := mustReq(http.MethodPost, "https://example.com/?id=1", "body")
+
+		// 2026-10-08 (perf audit ①): method eligibility is hoisted into
+		// AcquireQueryState (nil for ineligible requests); the helper mirrors
+		// the production call pattern (networkrules.ModifyReq).
+		call := func(req *http.Request) bool {
+			qs := AcquireQueryState(req)
+			modified := rm.ModifyQuery(req, qs)
+			if qs != nil {
+				if raw, changed := qs.Finalize(); changed {
+					req.URL.RawQuery = raw
+				}
+				ReleaseQueryState(qs)
+			}
+			return modified
+		}
+
+		if call(put) {
 			t.Error("PUT request must not be modified (doc 2634)")
 		}
 
-		bodylessPost := mustReq(http.MethodPost, "https://example.com/?id=1", "")
-		if !rm.ModifyQuery(bodylessPost) {
+		if !call(bodylessPost) {
 			t.Error("bodyless POST request should be modified (doc 2634 sometimes-POST)")
 		}
 
-		postWithBody := mustReq(http.MethodPost, "https://example.com/?id=1", "body")
-		if rm.ModifyQuery(postWithBody) {
+		if call(postWithBody) {
 			t.Error("POST with a body must not be modified (doc 2634)")
 		}
 	})

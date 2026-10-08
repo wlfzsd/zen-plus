@@ -100,33 +100,30 @@ func (rm *RemoveParamModifier) Parse(modifier string) error {
 // For names/values made only of unreserved ASCII characters the two
 // matching modes are equivalent; b7_test.go proves this against a verbatim
 // reference implementation of the pre-B7 decoded-mode behavior.
-func (rm *RemoveParamModifier) ModifyQuery(req *http.Request) bool {
-	switch strings.ToUpper(req.Method) {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		// Always eligible.
-	case http.MethodPost:
-		// Bodyless POST only (doc 2634 "sometimes POST").
-		if req.Body != nil && req.ContentLength != 0 {
-			return false
-		}
-	default:
-		return false
-	}
-
-	raw := req.URL.RawQuery
-	if raw == "" {
+//
+// 2026-10-08 (perf audit ①): the segments come from the per-request
+// QueryState (split once per ModifyReq pass) and are filtered in place; the
+// joined RawQuery is written back once by the caller via Finalize. Each rule
+// still sees exactly the segments the previous per-rule split/join
+// round-trip would have produced, and qs.Empty() reproduces the old
+// `req.URL.RawQuery != ""` gate, so outcomes are byte-identical. qs is nil
+// when the request has no query or its method is not eligible (both hoisted
+// into AcquireQueryState): the modifier returns false, as every per-rule
+// call did.
+func (rm *RemoveParamModifier) ModifyQuery(req *http.Request, qs *QueryState) bool {
+	if qs == nil || qs.Empty() {
 		return false
 	}
 
 	if rm.kind == removeparamKindGeneric {
 		// Naked $removeparam removes all query parameters (doc 2670).
 		// Same end state as the pre-B7 decoded-mode path (clear + Encode).
-		req.URL.RawQuery = ""
+		qs.SetEmpty()
 		return true
 	}
 
 	// Filter the raw "&"-separated pairs in encoded form.
-	segs := strings.Split(raw, "&")
+	segs := qs.Segments()
 	kept := segs[:0]
 	var modified bool
 	for _, seg := range segs {
@@ -169,7 +166,7 @@ func (rm *RemoveParamModifier) ModifyQuery(req *http.Request) bool {
 	if !modified {
 		return false
 	}
-	req.URL.RawQuery = strings.Join(kept, "&")
+	qs.SetSegments(kept)
 	return true
 }
 

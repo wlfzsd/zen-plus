@@ -3,10 +3,12 @@ package rulemodifiers
 import (
 	"errors"
 	"fmt"
+	"log"
 	"mime"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/irbis-sh/zen-desktop/internal/httprewrite"
 )
@@ -270,6 +272,41 @@ func isReplaceableResponse(res *http.Response) bool {
 	return strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml")
 }
 
+// [bound_audit 修复批 2026-10-08，发现②] 输出上限两个口径（任一超出即放弃
+// 本次替换、返回原体＋去重告警）：
+//   - replaceMaxOutputFactor：相对上限——输出 ≤ 输入×10。实测恶意形态
+//     "$replace=/a/<100B 字面量>/" 在 1MiB 体上放大 100×（bound_audit
+//     发现②），10× 足以放行全部正常语料规则（其输出≈输入）并截停膨胀；
+//   - replaceMaxOutputSize：绝对上限 10MB——对齐 replaceMaxBodySize 的
+//     文档口径（AdGuard 文档 2876），防止小体大模板绕过相对口径。
+// 注意：上限检查在 ReplaceAll 之后（裁决指定形态），它封住交付/驻留的
+// 输出尺寸；ReplaceAll 自身的临时分配仍与"本会产生的输出"同阶，极端
+// 组引用炸弹的瞬时代价已在 report.md §8 如实标注。
+const (
+	replaceMaxOutputFactor = 10
+	replaceMaxOutputSize   = 10 << 20
+)
+
+// replaceOutputOverCap 报告改写结果是否超出输出上限（输入×10 与绝对 10MB
+// 任一超出即超）。
+func replaceOutputOverCap(in, out int) bool {
+	return out > in*replaceMaxOutputFactor || out > replaceMaxOutputSize
+}
+
+// replaceOutputWarned 按 $replace 修饰符原文去重告警，同一规则每次进程至多
+// 告警一次（对齐 logJSONPruneApplyFailure 的 P3 去重形态）。
+var replaceOutputWarned sync.Map
+
+func warnReplaceOutputCapped(value string, in, out int) {
+	if value == "" {
+		value = "replace"
+	}
+	if _, loaded := replaceOutputWarned.LoadOrStore(value, struct{}{}); loaded {
+		return
+	}
+	log.Printf("replace %q: rewritten body %d bytes exceeds output cap (input %d bytes), replacement skipped", value, out, in)
+}
+
 func (m *ReplaceModifier) ModifyRes(res *http.Response) (bool, error) {
 	if m.cancelAll || m.re == nil {
 		return false, nil
@@ -283,8 +320,15 @@ func (m *ReplaceModifier) ModifyRes(res *http.Response) (bool, error) {
 		if !m.re.Match(src) {
 			return src
 		}
+		out := m.re.ReplaceAll(src, []byte(m.template))
+		// [bound_audit 修复批 2026-10-08，发现②] 输出超上限：放弃本次
+		// 替换、返回原体＋去重告警（touched 不置位＝规则按未应用上报）。
+		if replaceOutputOverCap(len(src), len(out)) {
+			warnReplaceOutputCapped(m.value, len(src), len(out))
+			return src
+		}
 		touched = true
-		return m.re.ReplaceAll(src, []byte(m.template))
+		return out
 	})
 	if err != nil {
 		return false, fmt.Errorf("buffer rewrite: %w", err)
