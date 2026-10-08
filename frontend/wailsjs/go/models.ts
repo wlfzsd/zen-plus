@@ -1,13 +1,13 @@
 export namespace config {
 	
+	export enum RoutingMode {
+	    ALLOWLIST = "allowlist",
+	    BLOCKLIST = "blocklist",
+	}
 	export enum UpdatePolicyType {
 	    AUTOMATIC = "automatic",
-	    PROMPT = "prompt",
 	    DISABLED = "disabled",
-	}
-	export enum RoutingMode {
-	    BLOCKLIST = "blocklist",
-	    ALLOWLIST = "allowlist",
+	    PROMPT = "prompt",
 	}
 	export class FilterList {
 	    name: string;
@@ -50,13 +50,13 @@ export namespace config {
 	    type: string;
 	    host: string;
 	    port: number;
-	    username: string;
-	    password: string;
-
+	    username?: string;
+	    password?: string;
+	
 	    static createFrom(source: any = {}) {
 	        return new UpstreamProxyConfig(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];

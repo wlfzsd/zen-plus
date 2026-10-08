@@ -70,6 +70,10 @@ export function GetVersion() {
   return window['go']['config']['Config']['GetVersion']();
 }
 
+export function HasUpstreamProxy() {
+  return window['go']['config']['Config']['HasUpstreamProxy']();
+}
+
 export function RemoveFilterList(arg1) {
   return window['go']['config']['Config']['RemoveFilterList'](arg1);
 }
@@ -110,10 +114,18 @@ export function SetUpdatePolicy(arg1) {
   return window['go']['config']['Config']['SetUpdatePolicy'](arg1);
 }
 
+export function SetUpstreamFromLegacyURL(arg1) {
+  return window['go']['config']['Config']['SetUpstreamFromLegacyURL'](arg1);
+}
+
 export function SetUpstreamProxy(arg1) {
   return window['go']['config']['Config']['SetUpstreamProxy'](arg1);
 }
 
 export function ToggleFilterList(arg1, arg2) {
   return window['go']['config']['Config']['ToggleFilterList'](arg1, arg2);
+}
+
+export function UpstreamProxyURL() {
+  return window['go']['config']['Config']['UpstreamProxyURL']();
 }

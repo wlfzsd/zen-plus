@@ -36,6 +36,8 @@ export function GetUpstreamProxy():Promise<config.UpstreamProxyConfig>;
 
 export function GetVersion():Promise<string>;
 
+export function HasUpstreamProxy():Promise<boolean>;
+
 export function RemoveFilterList(arg1:string):Promise<void>;
 
 export function RunMigrations():Promise<void>;
@@ -56,6 +58,10 @@ export function SetRules(arg1:Array<string>):Promise<void>;
 
 export function SetUpdatePolicy(arg1:config.UpdatePolicyType):Promise<void>;
 
+export function SetUpstreamFromLegacyURL(arg1:string):Promise<void>;
+
 export function SetUpstreamProxy(arg1:config.UpstreamProxyConfig):Promise<void>;
 
 export function ToggleFilterList(arg1:string,arg2:boolean):Promise<void>;
+
+export function UpstreamProxyURL():Promise<string|boolean>;
