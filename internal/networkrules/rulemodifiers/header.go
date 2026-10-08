@@ -56,7 +56,7 @@ func (h *HeaderModifier) ShouldMatchReq(_ *http.Request) bool {
 	return false
 }
 
-func (h *HeaderModifier) ShouldMatchRes(res *http.Response) bool {
+func (h *HeaderModifier) ShouldMatchRes(_ *http.Request, res *http.Response) bool {
 	for _, value := range res.Header[h.name] {
 		if value == "" {
 			continue

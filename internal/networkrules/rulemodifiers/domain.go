@@ -171,6 +171,16 @@ func refererHostname(referer string) (host string, ok bool) {
 }
 
 func (m *DomainModifier) ShouldMatchReq(req *http.Request) bool {
+	return m.matchReqSide(req)
+}
+
+// matchReqSide is the single semantic core of the $domain condition: the
+// referrer hostname (falling back to the target hostname when the Referer
+// header is absent), the MatchTargetDomain link for the response-action
+// families (docs §$domain L570, with the L572 negated-referrer veto), and
+// the per-entry negation semantics. Both ShouldMatchReq and ShouldMatchRes
+// evaluate it, so the two sides cannot drift (2026-10-08, B10).
+func (m *DomainModifier) matchReqSide(req *http.Request) bool {
 	referer := req.Header.Get("Referer")
 	var refHostname string
 	// Allow empty "Referer" header to make inverted rules work.
@@ -196,6 +206,21 @@ func (m *DomainModifier) ShouldMatchReq(req *http.Request) bool {
 	}
 
 	return m.matchHost(refHostname)
+}
+
+// ShouldMatchRes evaluates the $domain condition against the request that
+// produced the response (docs: the response-action effects of $cookie/$csp/
+// $permissions/$replace are defined on "requests matching the rule" —
+// L1519/L1600/L2297/L2869 — so the response side runs the same predicate as
+// the request side; 2026-10-08, B10). Before B10 this returned false
+// unconditionally, which made every $domain-qualified response-action rule
+// dead. req==nil (synthetic responses) keeps that conservative pre-B10
+// outcome.
+func (m *DomainModifier) ShouldMatchRes(req *http.Request, _ *http.Response) bool {
+	if req == nil {
+		return false
+	}
+	return m.matchReqSide(req)
 }
 
 // matchHost reports whether hostname satisfies the modifier's entry list:
@@ -245,10 +270,6 @@ func (m *DomainModifier) matchRestricted(hostname string) bool {
 			return true
 		}
 	}
-	return false
-}
-
-func (m *DomainModifier) ShouldMatchRes(_ *http.Response) bool {
 	return false
 }
 

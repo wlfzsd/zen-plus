@@ -16,7 +16,15 @@ type Modifier interface {
 type ConditionModifier interface {
 	Modifier
 	ShouldMatchReq(*http.Request) bool
-	ShouldMatchRes(*http.Response) bool
+	// ShouldMatchRes evaluates the condition for the response produced by
+	// req. AdGuard defines response-side action effects in terms of the
+	// request that produced the response (docs L1519/$cookie, L1600/$csp,
+	// L2297/$permissions, L2869/$replace: "the rule will not block the
+	// request. The response is going to be modified instead"), so the
+	// request is part of the response-side condition surface (2026-10-08,
+	// B10). req may be nil in synthetic/test responses; implementations
+	// must handle that conservatively.
+	ShouldMatchRes(req *http.Request, res *http.Response) bool
 }
 
 // ActionModifier modifies requests and responses.

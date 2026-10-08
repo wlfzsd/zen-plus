@@ -30,7 +30,7 @@ func (m *ThirdPartyModifier) ShouldMatchReq(req *http.Request) bool {
 	}
 }
 
-func (m *ThirdPartyModifier) ShouldMatchRes(_ *http.Response) bool {
+func (m *ThirdPartyModifier) ShouldMatchRes(_ *http.Request, _ *http.Response) bool {
 	return false
 }
 

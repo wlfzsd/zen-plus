@@ -560,20 +560,24 @@ func (rm *Rule) ModifiersMatchReq(req *http.Request) bool {
 	return true
 }
 
-// ShouldMatchRes returns true if the rule should match the response.
-func (rm *Rule) ShouldMatchRes(res *http.Response) bool {
-	return rm.ModifiersMatchRes(res)
+// ShouldMatchRes returns true if the rule should match the response produced
+// by req (2026-10-08, B10: the request is part of the response-side condition
+// surface — docs L1519/L1600/L2297/L2869 define response-action effects on
+// "requests matching the rule").
+func (rm *Rule) ShouldMatchRes(req *http.Request, res *http.Response) bool {
+	return rm.ModifiersMatchRes(req, res)
 }
 
-// ModifiersMatchRes returns true if the rule's matching modifiers match the response.
-func (rm *Rule) ModifiersMatchRes(res *http.Response) bool {
+// ModifiersMatchRes returns true if the rule's matching modifiers match the
+// response produced by req.
+func (rm *Rule) ModifiersMatchRes(req *http.Request, res *http.Response) bool {
 	// $badfilter disablement (2026-10-08 B6), evaluated against the request
-	// that produced the response when it is available. ExceptionRule
-	// embeds Rule and evaluates exceptions through the same
-	// ShouldMatchRes → ModifiersMatchRes entry, so disablement covers
-	// exceptions as well (2026-10-08 merge).
+	// that produced the response. B10 passes the request down explicitly —
+	// the previous res.Request read was nil in production (the proxy
+	// response objects do not carry Request), which silently disabled the
+	// partial-disablement check on the response path.
 	if rm.badfilterDisable != nil {
-		if rm.badfilterDisabledFor(res.Request) {
+		if rm.badfilterDisabledFor(req) {
 			return false
 		}
 	}
@@ -585,14 +589,14 @@ func (rm *Rule) ModifiersMatchRes(res *http.Response) bool {
 	}
 
 	for _, m := range rm.AndConditionModifiers() {
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(req, res) {
 			return false
 		}
 	}
 
 	if or := rm.OrConditionModifiers(); len(or) > 0 {
 		for _, m := range or {
-			if m.ShouldMatchRes(res) {
+			if m.ShouldMatchRes(req, res) {
 				return true
 			}
 		}

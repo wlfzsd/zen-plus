@@ -181,7 +181,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"image/jpeg"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected to match image/jpeg")
 		}
 	})
@@ -194,7 +194,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"text/css"}},
 		}
 
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected not to match text/css")
 		}
 	})
@@ -204,7 +204,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 
 		m := &ContentTypeModifier{contentType: "image"}
 		res := &http.Response{Header: http.Header{}}
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected false for empty Content-Type")
 		}
 	})
@@ -217,7 +217,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"image/jpeg"}},
 		}
 
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected inverted not to match image/jpeg")
 		}
 	})
@@ -230,7 +230,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"text/css"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected to match text/css for stylesheet")
 		}
 	})
@@ -243,7 +243,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"image/jpeg; charset=utf-8"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected to match image/jpeg; charset=utf-8 for image")
 		}
 	})
@@ -256,7 +256,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"Application/JavaScript"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected to match Application/JavaScript for script")
 		}
 	})
@@ -269,7 +269,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"application/weird"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected other to match unknown content type")
 		}
 	})
@@ -282,7 +282,7 @@ func TestContentTypeModifier_ShouldMatchRes(t *testing.T) {
 			Header: http.Header{"Content-Type": []string{"image/jpeg"}},
 		}
 
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Fatal("expected inverted other to match known content type")
 		}
 	})

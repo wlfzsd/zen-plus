@@ -239,7 +239,7 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	primaryRules := nr.primaryStore.Get(url)
 	defer nr.primaryStore.putRes(primaryRules)
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
-		if !r.ShouldMatchRes(res) {
+		if !r.ShouldMatchRes(req, res) {
 			return false
 		}
 		if !frameLoad && r.FrameScoped {

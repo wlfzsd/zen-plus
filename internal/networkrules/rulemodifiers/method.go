@@ -56,7 +56,7 @@ func (m *MethodModifier) ShouldMatchReq(req *http.Request) bool {
 	return matches
 }
 
-func (m *MethodModifier) ShouldMatchRes(_ *http.Response) bool {
+func (m *MethodModifier) ShouldMatchRes(_ *http.Request, _ *http.Response) bool {
 	return false
 }
 

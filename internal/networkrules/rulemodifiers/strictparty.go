@@ -56,7 +56,7 @@ func (m *StrictPartyModifier) ShouldMatchReq(req *http.Request) bool {
 	return !same
 }
 
-func (m *StrictPartyModifier) ShouldMatchRes(_ *http.Response) bool {
+func (m *StrictPartyModifier) ShouldMatchRes(_ *http.Request, _ *http.Response) bool {
 	// Same response-phase behavior as ThirdPartyModifier.
 	return false
 }

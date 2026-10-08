@@ -60,7 +60,7 @@ func (m *DenyAllowModifier) ShouldMatchReq(req *http.Request) bool {
 	return true
 }
 
-func (m *DenyAllowModifier) ShouldMatchRes(_ *http.Response) bool {
+func (m *DenyAllowModifier) ShouldMatchRes(_ *http.Request, _ *http.Response) bool {
 	return false
 }
 

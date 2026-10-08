@@ -45,12 +45,12 @@ func TestHeaderModifier(t *testing.T) {
 				"Content-Type": []string{"application/json"},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 
 		res.Header.Del("Content-Type")
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = true, want false")
 		}
 	})
@@ -67,7 +67,7 @@ func TestHeaderModifier(t *testing.T) {
 				"Etag": []string{`"abc"`},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 	})
@@ -84,7 +84,7 @@ func TestHeaderModifier(t *testing.T) {
 				"Set-Cookie": []string{"session=abc"},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 	})
@@ -101,7 +101,7 @@ func TestHeaderModifier(t *testing.T) {
 				"Set-Cookie": []string{"theme=dark", "session=abc"},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 	})
@@ -118,17 +118,17 @@ func TestHeaderModifier(t *testing.T) {
 				"Content-Type": []string{"application/json"},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 
 		res.Header.Set("Content-Type", "application/xml")
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = true, want false")
 		}
 
 		res.Header.Del("Content-Type")
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = true, want false")
 		}
 	})
@@ -145,17 +145,17 @@ func TestHeaderModifier(t *testing.T) {
 				"Content-Type": []string{"application/json"},
 			},
 		}
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 
 		res.Header.Set("Content-Type", "application/xml")
-		if !m.ShouldMatchRes(res) {
+		if !m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = false, want true")
 		}
 
 		res.Header.Set("Content-Type", "text/plain")
-		if m.ShouldMatchRes(res) {
+		if m.ShouldMatchRes(nil, res) {
 			t.Error("headerModifier.ShouldMatchRes(res) = true, want false")
 		}
 	})

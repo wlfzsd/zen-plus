@@ -349,9 +349,10 @@ func (er *ExceptionRule) ShouldMatchReq(req *http.Request) bool {
 	return er.ModifiersMatchReq(req)
 }
 
-// ShouldMatchRes returns true if the rule should match the response.
-func (er *ExceptionRule) ShouldMatchRes(res *http.Response) bool {
-	return er.ModifiersMatchRes(res)
+// ShouldMatchRes returns true if the rule should match the response produced
+// by req (2026-10-08, B10: request passed for condition parity with Rule).
+func (er *ExceptionRule) ShouldMatchRes(req *http.Request, res *http.Response) bool {
+	return er.ModifiersMatchRes(req, res)
 }
 
 // CancelsNothingOnReq reports whether the exception — already matched to the
