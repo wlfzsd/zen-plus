@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +73,9 @@ func (a *App) buildFilter() (*filter.Filter, *whitelistserver.Server, *asset.Eng
 		// Reassigning drops the previous pass's tainted structures before
 		// the heavy parsing starts, so peak memory stays bounded by one full
 		// rule tree plus the one being built.
-		networkRules := networkrules.New()
+		// ZEN_RULE_COVER_DEDUP=0 一键回退装载后覆盖去重（2026-10-09，
+		// 默认开启；见 internal/networkrules/coveragededup.go）。
+		networkRules := networkrules.New(networkrules.WithCoverageDedup(os.Getenv("ZEN_RULE_COVER_DEDUP") != "0"))
 		whitelistSrv = whitelistserver.New(networkRules)
 		var err error
 		assetInjector, err = asset.NewEngine(constants.LocalEndpointHost)

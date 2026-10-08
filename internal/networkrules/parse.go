@@ -35,13 +35,17 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 			}
 
 			pattern := fmt.Sprintf("||%s^", host)
-			if err := nr.primaryStore.Insert(pattern, &rule.Rule{
+			hostRule := &rule.Rule{
 				RawRule:    pattern + "$document",
 				FilterName: filterName,
 				Document:   true,
-			}); err != nil {
+			}
+			if err := nr.primaryStore.Insert(pattern, hostRule); err != nil {
 				return false, fmt.Errorf("insert hosts rule: %w", err)
 			}
+			// 覆盖去重候选（2026-10-09）：hosts 派生规则与显式 ||d^$document
+			// 行为一致（Document 标志），可互相覆盖。
+			nr.covRecordPrimary(hostRule, pattern)
 		}
 
 		return false, nil
@@ -86,6 +90,8 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 		if err := nr.exceptionStore.Insert(pattern, r); err != nil {
 			return false, fmt.Errorf("insert exception rule: %w", err)
 		}
+		// 覆盖去重候选（2026-10-09）：例外侧同签名覆盖。
+		nr.covRecordException(r, pattern)
 
 		// 2026-10-08 (B2): track exceptions whose effects reach the whole
 		// page so ModifyReq/ModifyRes can skip the Referer lookup when no
@@ -144,6 +150,8 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 	if err := nr.primaryStore.Insert(pattern, r); err != nil {
 		return false, fmt.Errorf("insert rule: %w", err)
 	}
+	// 覆盖去重候选（2026-10-09）：阻断侧同签名覆盖。
+	nr.covRecordPrimary(r, pattern)
 
 	return false, nil
 }

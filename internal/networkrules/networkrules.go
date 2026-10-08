@@ -44,6 +44,18 @@ type NetworkRules struct {
 	// badfilter.go, 2026-10-08 B6). They are applied once in Compact, after
 	// every filter list was fully loaded, and never inserted into a store.
 	badfilters []badfilterRule
+
+	// 覆盖去重（2026-10-09，coveragededup.go）：装载期登记候选，Compact
+	// 在 applyBadfilters 之后一次性解析覆盖链并物理剪枝。covArmed 在
+	// Compact 后解除武装——白名单服务器等活插入永不参与。covOn 是
+	// WithCoverageDedup 开关（默认开启，ZEN_RULE_COVER_DEDUP=0 可关）。
+	covOn    bool
+	covArmed atomic.Bool
+	covMu    sync.Mutex
+	covP     []covRecPrimary
+	covE     []covRecException
+	// covTimeNanos 是最近一次去重阶段的耗时（resolve+prune，诊断用）。
+	covTimeNanos atomic.Int64
 }
 
 // NetworkRulesOption customizes a NetworkRules at construction.
@@ -57,12 +69,21 @@ func WithActionIndex(enabled bool) NetworkRulesOption {
 	return func(nr *NetworkRules) { nr.actionIdxOn = enabled }
 }
 
+// WithCoverageDedup enables (default) or disables the post-load coverage
+// dedup (2026-10-09, coveragededup.go). Disabled, rules load exactly as
+// before — the rollback switch for the dedup pass.
+func WithCoverageDedup(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) { nr.covOn = enabled }
+}
+
 func New(opts ...NetworkRulesOption) *NetworkRules {
 	nr := &NetworkRules{
 		primaryStore:   newRuleStore[*rule.Rule](),
 		exceptionStore: newRuleStore[*exceptionrule.ExceptionRule](),
 		actionIdxOn:    true,
+		covOn:          true,
 	}
+	nr.covArmed.Store(true)
 	for _, opt := range opts {
 		opt(nr)
 	}
@@ -435,6 +456,10 @@ func (nr *NetworkRules) Compact() {
 	// $badfilter disablement must run after every filter list was loaded
 	// and before the stores are used for matching (2026-10-08 B6).
 	nr.applyBadfilters()
+	// 覆盖去重（2026-10-09）必须在 applyBadfilters 之后：幸存链终点的
+	// 禁用态打标完成后才能安全判定；并在 store.Compact 之前，让 trimslice
+	// 收尾剪枝后的切片容量。
+	nr.applyCoverageDedup()
 	nr.primaryStore.Compact()
 	nr.exceptionStore.Compact()
 }
