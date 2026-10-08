@@ -165,13 +165,14 @@ func (f *Filter) AddURL(ctx context.Context, listURL string, listName string, li
 
 	var ruleCount, exceptionCount int
 	var countsMu sync.Mutex
+	var parseFailures int
 
 	addRuleLine := func(line string) {
 		if len(line) == 0 || ignoreLineRegex.MatchString(line) {
 			return
 		}
 		if isException, err := f.addRule(line, &listName, listTrusted); err != nil { // nolint:revive
-			// log.Printf("error adding rule: %v", err)
+			parseFailures++ // 2026-10-08 可观测性: parse 失败的规则曾被静默丢弃（引号联合 jsonprune 即此命运）
 		} else {
 			countsMu.Lock()
 			if isException {
@@ -300,6 +301,9 @@ func (f *Filter) AddURL(ctx context.Context, listURL string, listName string, li
 	wg.Wait()
 
 	log.Printf("filter: added %d rules, %d exceptions from %s", ruleCount, exceptionCount, listName)
+	if parseFailures > 0 {
+		log.Printf("filter: %d rules from %s failed to parse and were skipped", parseFailures, listName)
+	}
 	return outcome
 }
 

@@ -128,6 +128,13 @@ func extractMimicSpec(raw []byte, inboundH2 bool) *utls.ClientHelloSpec {
 		return nil
 	}
 	alignSpecALPN(spec, inboundH2)
+	// [2026-10-08 诊断] ZEN_FORCE_H1_OUT=1: 出站 ALPN 强制只报 http/1.1（复刻
+	// h2-mirror 之前的行为），用于 A/B 验证 YouTube 对 h1 客户端的广告投放。
+	// 仅诊断会话启用，默认关闭。
+	if os.Getenv("ZEN_FORCE_H1_OUT") == "1" {
+		alignSpecALPN(spec, false)
+		log.Printf("mimic: ZEN_FORCE_H1_OUT=1, outbound ALPN forced to http/1.1")
+	}
 	dropInvalidCredentials(spec)
 	if !sanitizeSpecForGo(spec) {
 		log.Printf("mimic: mirrored hello unusable by the Go TLS stack; refusing to dial")
