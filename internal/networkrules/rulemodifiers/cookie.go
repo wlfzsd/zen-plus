@@ -33,6 +33,10 @@ type CookieModifier struct {
 	kind   cookieKind
 	name   string
 	regexp *regexp.Regexp
+	// pattern caches regexp.String() (2026-10-08, perf): Cancels compares
+	// patterns per exception×rule pair, and String() rebuilds the
+	// expression on every call.
+	pattern string
 
 	// maxAge is the number of seconds to offset the cookie expiration date.
 	// Zero (including a bare $cookie) means matched cookies are expired
@@ -107,6 +111,7 @@ func (cm *CookieModifier) Parse(modifier string) error {
 	if re != nil {
 		cm.kind = cookieKindRegexp
 		cm.regexp = re
+		cm.pattern = re.String()
 		return nil
 	}
 
@@ -198,6 +203,16 @@ func (cm *CookieModifier) ModifyRes(res *http.Response) (modified bool, err erro
 //   - a bare @@…$cookie cancels every $cookie rule (all cookies);
 //   - @@…$cookie=NAME cancels a rule matching the same exact name;
 //   - @@…$cookie=/re/ cancels a rule with the same regular expression.
+// regexpPattern returns the cached pattern string, lazily filling the
+// cache for modifiers constructed without going through Parse (tests).
+// (2026-10-08, perf)
+func (cm *CookieModifier) regexpPattern() string {
+	if cm.pattern == "" && cm.regexp != nil {
+		cm.pattern = cm.regexp.String()
+	}
+	return cm.pattern
+}
+
 func (cm *CookieModifier) Cancels(other Modifier) bool {
 	om, ok := other.(*CookieModifier)
 	if !ok {
@@ -212,7 +227,7 @@ func (cm *CookieModifier) Cancels(other Modifier) bool {
 	default:
 		return om.kind == cookieKindRegexp &&
 			cm.regexp != nil && om.regexp != nil &&
-			cm.regexp.String() == om.regexp.String()
+			cm.pattern == om.pattern
 	}
 }
 

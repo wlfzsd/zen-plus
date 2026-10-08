@@ -22,6 +22,10 @@ type RemoveParamModifier struct {
 	kind   removeparamKind
 	param  string
 	regexp *regexp.Regexp
+	// pattern caches regexp.String() (2026-10-08, perf): Cancels compares
+	// patterns per exception×rule pair, and String() rebuilds the
+	// expression on every call.
+	pattern string
 }
 
 var _ QueryModifier = (*RemoveParamModifier)(nil)
@@ -55,6 +59,7 @@ func (rm *RemoveParamModifier) Parse(modifier string) error {
 			rm.kind = removeparamKindRegexp
 		}
 		rm.regexp = regexp
+		rm.pattern = regexp.String()
 		return nil
 	}
 
@@ -93,9 +98,8 @@ func (rm *RemoveParamModifier) Parse(modifier string) error {
 //     re-escaped the remaining pairs) is gone.
 //
 // For names/values made only of unreserved ASCII characters the two
-// matching modes are equivalent (AdGuard docs 2626-2738; batch B7 verified
-// the equivalence against a verbatim reference implementation of the pre-B7
-// decoded-mode behavior).
+// matching modes are equivalent; b7_test.go proves this against a verbatim
+// reference implementation of the pre-B7 decoded-mode behavior.
 func (rm *RemoveParamModifier) ModifyQuery(req *http.Request) bool {
 	switch strings.ToUpper(req.Method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -169,6 +173,16 @@ func (rm *RemoveParamModifier) ModifyQuery(req *http.Request) bool {
 	return true
 }
 
+// regexpPattern returns the cached pattern string, lazily filling the
+// cache for modifiers constructed without going through Parse (tests).
+// (2026-10-08, perf)
+func (rm *RemoveParamModifier) regexpPattern() string {
+	if rm.pattern == "" && rm.regexp != nil {
+		rm.pattern = rm.regexp.String()
+	}
+	return rm.pattern
+}
+
 func (rm *RemoveParamModifier) Cancels(modifier Modifier) bool {
 	other, ok := modifier.(*RemoveParamModifier)
 	if !ok {
@@ -193,5 +207,5 @@ func (rm *RemoveParamModifier) Cancels(modifier Modifier) bool {
 	if rm.regexp == nil || other.regexp == nil {
 		return false
 	}
-	return rm.regexp.String() == other.regexp.String()
+	return rm.regexpPattern() == other.regexpPattern()
 }

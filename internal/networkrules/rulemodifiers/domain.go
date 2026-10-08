@@ -36,6 +36,12 @@ type DomainModifier struct {
 	// already gated per request by ShouldMatchReq, so comparing it would
 	// needlessly break subset exceptions. (2026-10-08, B5)
 	MatchTargetDomain bool
+
+	// hasInverted is true when any entry is negated. Precomputed at parse
+	// time (2026-10-08, perf): matchHost restores the early-exit scan for
+	// the overwhelmingly common negation-free lists, while negation-bearing
+	// lists keep the full "negated always wins" scan.
+	hasInverted bool
 }
 
 var _ ConditionModifier = (*DomainModifier)(nil)
@@ -108,6 +114,7 @@ func (m *DomainModifier) Parse(modifier string) error {
 	for i, entry := range matches {
 		inverted := len(entry) > 0 && entry[0] == '~'
 		if inverted {
+			m.hasInverted = true
 			entry = entry[1:]
 		}
 
@@ -197,7 +204,21 @@ func (m *DomainModifier) ShouldMatchReq(req *http.Request) bool {
 // except ..."). This is AdGuard's per-entry negation semantics; negated
 // entries always win, so a positive hit does not end the scan — later
 // negated entries can still veto. (2026-10-08, B5)
+//
+// Perf (2026-10-08): negation-free lists — the overwhelming majority —
+// restore the pre-B5 first-hit early exit (identical semantics: with no
+// negated entries a positive hit is final). Only negation-bearing lists
+// pay the full scan.
 func (m *DomainModifier) matchHost(hostname string) bool {
+	if !m.hasInverted {
+		for i := range m.entries {
+			if m.entries[i].MatchDomain(hostname) {
+				return true
+			}
+		}
+		return false
+	}
+
 	hasPermitted := false
 	permitted := false
 	for i := range m.entries {
@@ -237,6 +258,10 @@ type domainModifierEntry struct {
 	regexp  *regexp.Regexp
 	// inverted marks a negated ("~"-prefixed) entry. (2026-10-08, B5)
 	inverted bool
+	// dotRegular is "."+regular, precomputed at parse time so MatchDomain
+	// does a zero-allocation suffix check. (2026-10-08, perf: the per-call
+	// concatenation dominated CPU on candidate-heavy requests.)
+	dotRegular string
 }
 
 func (m *domainModifierEntry) Parse(entry string) error {
@@ -260,6 +285,7 @@ func (m *domainModifierEntry) Parse(entry string) error {
 	}
 
 	m.regular = entry
+	m.dotRegular = "." + entry
 	return nil
 }
 
@@ -305,7 +331,7 @@ func effectiveTLDPlusOneCached(domain string) (string, bool) {
 func (m *domainModifierEntry) MatchDomain(domain string) bool {
 	switch {
 	case m.regular != "":
-		return m.regular == domain || strings.HasSuffix(domain, "."+m.regular)
+		return m.regular == domain || strings.HasSuffix(domain, m.dotRegular)
 	case m.tld != "":
 		eTLD1, ok := effectiveTLDPlusOneCached(domain)
 		if !ok {
