@@ -26,6 +26,20 @@ type ActionModifier interface {
 	ModifyRes(*http.Response) (bool, error)
 }
 
+// FrameScopedAction is an ActionModifier whose documented effect is limited
+// to main frame and sub frame requests. AdGuard docs §$permissions note
+// (adguard_create-own-filters.md line 2321): "$permissions rules only take
+// effect for main frame and sub frame requests. This means they are applied
+// when a page is loaded or when an iframe is loaded."
+//
+// networkrules.ModifyRes consults the flag so frame-scoped rules are skipped
+// for every other response (images, XHR, 204s, ...) instead of applying an
+// out-of-scope rewrite (2026-10-08, B9).
+type FrameScopedAction interface {
+	ActionModifier
+	IsFrameScoped() bool
+}
+
 // QueryModifier modifies request query parameters.
 // According to terminology, they are also "action modifiers", but are implemented separately for performance reasons.
 //

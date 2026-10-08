@@ -126,6 +126,12 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 		nr.addBadfilter(pattern, modifiers)
 		return false, nil
 	}
+	// Frame-scoped action rules ($permissions, docs 2321) enable the
+	// ModifyRes Sec-Fetch-Dest gate; counting at insert keeps the gate
+	// free while no such rule is loaded (2026-10-08 B9).
+	if r.FrameScoped {
+		nr.frameScopedRules.Add(1)
+	}
 	if err := nr.primaryStore.Insert(pattern, r); err != nil {
 		return false, fmt.Errorf("insert rule: %w", err)
 	}

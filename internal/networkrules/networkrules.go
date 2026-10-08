@@ -23,6 +23,13 @@ type NetworkRules struct {
 	// the Referer (page) lookup entirely (2026-10-08 B2).
 	pageScopedExceptions atomic.Int64
 
+	// frameScopedRules counts inserted primary rules carrying a frame-scoped
+	// action modifier ($permissions, rulemodifiers.FrameScopedAction, AdGuard
+	// docs line 2321). While it is zero, ModifyRes skips the Sec-Fetch-Dest
+	// frame-load check entirely (2026-10-08 B9) — same shape as
+	// pageScopedExceptions.
+	frameScopedRules atomic.Int64
+
 	// badfilters holds $badfilter rules collected at parse time (see
 	// badfilter.go, 2026-10-08 B6). They are applied once in Compact, after
 	// every filter list was fully loaded, and never inserted into a store.
@@ -219,10 +226,26 @@ outer:
 func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule.Rule, error) {
 	url := matchURL(req.URL)
 
+	// 2026-10-08 (B9): $permissions actions are documented to take effect
+	// for main frame and sub frame requests only (docs 2321); before B9 the
+	// Permissions-Policy header was added to every matching response
+	// (images, JSON API replies, 204s — ~4255 responses per 31 min in the
+	// 2026-10-08 decisions.jsonl capture). Frame-scoped rules are dropped
+	// here for non-frame responses; when no such rule is loaded the header
+	// read is skipped entirely (mirrors pageScopedExceptions).
+	restrictFrames := nr.frameScopedRules.Load() > 0
+	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
+
 	primaryRules := nr.primaryStore.Get(url)
 	defer nr.primaryStore.putRes(primaryRules)
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
-		return r.ShouldMatchRes(res)
+		if !r.ShouldMatchRes(res) {
+			return false
+		}
+		if !frameLoad && r.FrameScoped {
+			return false
+		}
+		return true
 	})
 	if len(primaryRules) == 0 {
 		return nil, nil

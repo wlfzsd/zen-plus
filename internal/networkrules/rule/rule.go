@@ -52,6 +52,15 @@ type Rule struct {
 	// applies them once in Compact, after every filter list was fully
 	// loaded (禁逐条即时禁用).
 	Badfilter bool
+	// FrameScoped marks a rule carrying an action modifier whose documented
+	// scope is main frame and sub frame requests only
+	// (rulemodifiers.FrameScopedAction — $permissions, AdGuard docs line
+	// 2321). networkrules.ModifyRes consults it to skip such rules for
+	// non-frame responses (images, XHR, 204s, ...). 2026-10-08 (B9).
+	// Note: the rule's own Document/Popup flags are request-side navigation
+	// guards, not response content-type conditions, so they cannot express
+	// this restriction.
+	FrameScoped bool
 	// badfilterDisable holds post-load $badfilter disablement state; nil
 	// unless a $badfilter rule targeted this rule (set in
 	// networkrules.Compact via applyBadfilters).
@@ -334,6 +343,12 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 		case rulemodifiers.ActionModifier:
 			mods := rm.ensureActMods()
 			mods.action = append(mods.action, typed)
+			// Frame-scoped actions ($permissions, docs 2321): mark the rule
+			// so the response path can restrict them to frame loads
+			// (2026-10-08 B9).
+			if fs, ok := typed.(rulemodifiers.FrameScopedAction); ok && fs.IsFrameScoped() {
+				rm.FrameScoped = true
+			}
 		case rulemodifiers.QueryModifier:
 			mods := rm.ensureActMods()
 			mods.query = append(mods.query, typed)
