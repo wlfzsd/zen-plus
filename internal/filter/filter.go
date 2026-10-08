@@ -458,15 +458,25 @@ func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processIn
 		}
 	}
 
-	// [2026-10-08 采集 v3] jsonprune 覆盖缺口取证：转储 player 响应原始体。
-	// 读前 1MB 落盘，剩余部分用 MultiReader 原样续传，不改变响应流。
-	if taplog.Enabled() && req.URL != nil && strings.HasPrefix(req.URL.Path, "/youtubei/v1/") && res.Body != nil {
-		buf, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		taplog.DumpPlayerBody(req.URL.String(), buf)
-		if len(buf) < 1<<20 {
-			res.Body = io.NopCloser(bytes.NewReader(buf))
-		} else {
-			res.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buf), res.Body), Closer: res.Body}
+	// [2026-10-08 采集 v4] 取证转储：/youtubei/v1/ API 响应 + youtube HTML 文档
+	// （赞助商内容可内嵌于文档的 ytInitialData）。读前 1MB 落盘，剩余用
+	// MultiReader 原样续传，不改变响应流。
+	if taplog.Enabled() && req.URL != nil && res.Body != nil {
+		isAPI := strings.HasPrefix(req.URL.Path, "/youtubei/v1/")
+		isYTHTML := strings.EqualFold(req.URL.Hostname(), "www.youtube.com") &&
+			strings.HasPrefix(res.Header.Get("Content-Type"), "text/html")
+		if isAPI || isYTHTML {
+			buf, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+			if isAPI {
+				taplog.DumpAPIBody(req.URL.String(), buf)
+			} else {
+				taplog.DumpHTMLBody(req.URL.String(), buf)
+			}
+			if len(buf) < 1<<20 {
+				res.Body = io.NopCloser(bytes.NewReader(buf))
+			} else {
+				res.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buf), res.Body), Closer: res.Body}
+			}
 		}
 	}
 
