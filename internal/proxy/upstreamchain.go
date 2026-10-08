@@ -221,9 +221,26 @@ func applyUpstreamChain(p *Proxy) {
 	// purpose - the tunnel is established inside the dial. The stock
 	// transport's TLSClientConfig is read live, so verification
 	// customisations made after the chain is built are still honoured.
-	p.requestTransportHTTPS = newMimicRoundTripper(p, func() *tls.Config {
-		return transport.TLSClientConfig
-	})
+	// [2026-10-08 诊断开关] ZEN_LEGACY_OUT=1：完全复刻 h2-mirror 之前的出站
+	// 行为（Go TLS + HTTP/1.1 + 标准头序，跳过 uTLS 指纹镜像与 h2 重放），
+	// 用于 A/B 验证"广告回归是否由出站客户端表现变化引起"。默认关闭。
+	if os.Getenv("ZEN_LEGACY_OUT") == "1" {
+		legacy := transport.Clone()
+		legacy.ForceAttemptHTTP2 = false
+		next := legacy.TLSClientConfig.Clone()
+		if next == nil {
+			next = &tls.Config{}
+		}
+		next.NextProtos = []string{"http/1.1"}
+		legacy.TLSClientConfig = next
+		legacy.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		p.requestTransportHTTPS = legacy
+		log.Printf("upstream proxy: ZEN_LEGACY_OUT=1, HTTPS outbound forced to legacy Go-TLS HTTP/1.1 (no mimic)")
+	} else {
+		p.requestTransportHTTPS = newMimicRoundTripper(p, func() *tls.Config {
+			return transport.TLSClientConfig
+		})
+	}
 
 	log.Printf("upstream proxy: chaining outbound traffic through %s://%s (source: %s)", u.Scheme, u.Host, source)
 }
