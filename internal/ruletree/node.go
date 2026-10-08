@@ -81,6 +81,18 @@ func (n *node[T]) getEdge(label token) *node[T] {
 	return nil
 }
 
+// vKey identifies one sub-traversal state: node, how many prefix tokens
+// remain, and the base-URL offset the url suffix starts at (2026-10-08 P6
+// memo). traversePrefix memoizes on this key, covering every recursion
+// state — including the within-node wildcard position enumeration
+// (case tokenWildcard default) and separator double-recursion that never
+// pass through visit.
+type vKey[T Data] struct {
+	n    *node[T]
+	plen int
+	off  int
+}
+
 // traverser holds the state for a single traverse() call.
 type traverser[T Data] struct {
 	data []T
@@ -95,6 +107,42 @@ type traverser[T Data] struct {
 	// (leak_capture heap_2.txt node.go:112 / goroutine_2.txt). nil keeps the
 	// plain append semantics used by traverse()/Get.
 	dedup map[T]struct{}
+
+	// base (2026-10-08 P6 memo): the full URL this traversal walks. Every
+	// url string reaching visit/traversePrefix is a suffix of base, so
+	// len(base)-len(url) is the offset the suffix starts at.
+	base string
+
+	// visited (2026-10-08 P6 memo): when non-nil, a (node, offset) pair is
+	// traversed at most once per call. Combinatorial URLs (dense traversal
+	// markers) re-enter the same sub-traversal from hundreds of starting
+	// offsets — e.g. a 1017-char alicdn "??,..." combo URL exceeded 15 s in
+	// GetLP (normal: ~16 µs) because each of the ~hundreds marker positions
+	// re-walked the same wildcard subtrees, exponentially re-visiting
+	// (node, offset) pairs. Skipping a REPEAT entry is semantics-neutral:
+	// the leaf values a repeat would collect are already in dedup (their
+	// first entry inserted them in the same relative order), so the output
+	// sequence is bit-identical. nil keeps the un-memoized walk.
+	visited map[vKey[T]]struct{}
+
+	// tailMin (2026-10-08 P6 memo): per-call smallest offset each
+	// wildcard-tail node (prefix == single wildcard token) has walked. A
+	// tail walk at offset m scans and dispatches over EVERY suffix ≥ m, so
+	// its collection is a superset of any walk at offset ≥ m at the same
+	// node — later entries are accumulator-neutral and skipped. This
+	// collapses the per-marker-position root restarts (each re-dispatching
+	// the same wildcard tails) from O(positions²) to one walk per tail node.
+	tailMin map[*node[T]]int
+
+	// budgetOut (2026-10-08 P6 budget): set when the per-call visited-pair
+	// budget (MaxVisitedEntries) is exhausted. Further sub-traversals are
+	// skipped for the rest of the call — a deliberate fail-open valve
+	// (partial candidate set, request proceeds) mirroring how the old
+	// engine behaved on pathological URLs it could not finish. NOT part of
+	// the zero-semantics-change memoization; the root-cause fix is the
+	// memoization above.
+	budgetOut     bool
+	budgetCounted bool
 }
 
 // appendLeaf adds n's leaf values to the accumulator, honoring t.dedup.
@@ -122,7 +170,28 @@ func (n *node[T]) traverse(url string) []T {
 // visit (2026-10-06) continues a SHARED traversal accumulator at child
 // node n: identical semantics to n.traverse(url) appended into t.data, but
 // without allocating a fresh traverser per sub-traversal.
+//
+// 2026-10-08 P6 memo: visit itself no longer memoizes — the state key moved
+// into traversePrefix (covering every recursion state). visit keeps only the
+// wildcard-tail subsumption: a tail node walked at the smallest offset
+// collects a superset of any larger-offset walk of the same node, so later
+// entries skip without even registering a state (traverser.tailMin).
+//
+// 2026-10-08 P6 budget: once budgetOut is set (MaxVisitedEntries exhausted)
+// every new sub-traversal is skipped for the rest of the call (fail-open).
 func (t *traverser[T]) visit(n *node[T], url string) {
+	if t.visited != nil {
+		if t.budgetOut {
+			return
+		}
+		off := len(t.base) - len(url)
+		if pl := n.prefixSlice(); len(pl) == 1 && pl[0] == tokenWildcard {
+			if mn, ok := t.tailMin[n]; ok && mn <= off {
+				return
+			}
+			t.tailMin[n] = off
+		}
+	}
 	old := t.n
 	t.n = n
 	t.traversePrefix(n.prefixSlice(), url)
@@ -131,6 +200,32 @@ func (t *traverser[T]) visit(n *node[T], url string) {
 
 
 func (t *traverser[T]) traversePrefix(prefix []token, url string) {
+	// 2026-10-08 P6 memo: every recursion state (node, remaining prefix
+	// length, url offset) is traversed at most once per call. The walk of a
+	// state is a pure function of the state, and a repeat's leaf insertions
+	// all hit dedup (its values were inserted, in the same relative order,
+	// by the state's first walk), so skipping repeats is accumulator- and
+	// order-neutral. This covers the within-node enumerations that never
+	// pass through visit and turns the backtracking matcher's
+	// exponential re-walks into distinct-state work.
+	if t.visited != nil {
+		if t.budgetOut {
+			return
+		}
+		k := vKey[T]{n: t.n, plen: len(prefix), off: len(t.base) - len(url)}
+		if _, seen := t.visited[k]; seen {
+			return
+		}
+		if len(t.visited) >= MaxVisitedEntries {
+			t.budgetOut = true
+			if !t.budgetCounted {
+				t.budgetCounted = true
+				budgetExceededCalls.Add(1)
+			}
+			return
+		}
+		t.visited[k] = struct{}{}
+	}
 	if len(prefix) == 0 {
 		if t.n.isLeaf() {
 			t.appendLeaf()
@@ -224,6 +319,13 @@ func (t *traverser[T]) traverseWildcardTail(url string) {
 
 	// Wildcard matches the entire remaining URL.
 	t.traversePrefix(nil, "")
+
+	// 2026-10-08 P6 memo: a tail node without child edges matches its leaf
+	// for ANY suffix — the position scan below has nothing to dispatch and
+	// would be pure O(len(url)) waste per (node, offset) entry.
+	if len(n.edges) == 0 {
+		return
+	}
 
 	separator := n.getEdge(tokenSeparator)
 	wildcard := n.getEdge(tokenWildcard)

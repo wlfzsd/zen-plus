@@ -3,6 +3,7 @@ package ruletree
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/irbis-sh/zen-desktop/internal/ruletree/byteset"
 )
@@ -28,7 +29,41 @@ type Tree[T Data] struct {
 	lpOnce  sync.Once
 	accPool sync.Pool
 	mapPool sync.Pool
+	// visPool (2026-10-08 P6 memo) backs the per-call (node, offset)
+	// memoization maps used for combinatorial URLs; see maxMemoFreeURLLen.
+	visPool sync.Pool
+	// tailPool (2026-10-08 P6 memo) backs the per-call wildcard-tail
+	// subsumption maps (tail node → smallest walked offset).
+	tailPool sync.Pool
 }
+
+// MaxVisitedEntries (2026-10-08 P6 budget) caps the per-call (node, offset)
+// memoization pairs. It is a tunable safety valve, not part of the
+// memoization semantics: memoized traversal of realistic URLs stays orders
+// of magnitude below it (a 1017-char alicdn combo URL uses ~10⁴ pairs), so
+// hitting it means an unknown pathological pattern/URL combination. A call
+// that exhausts the budget abandons further sub-traversals (fail-open:
+// partial candidate set, request proceeds — the same net behavior the old
+// engine had when a pathological URL hung past its deadline) and bumps the
+// atomic counter exposed by TraversalBudgetExceeded.
+var MaxVisitedEntries = 1_000_000
+
+// budgetExceededCalls counts GetLP calls that exhausted MaxVisitedEntries.
+var budgetExceededCalls atomic.Uint64
+
+// TraversalBudgetExceeded reports how many GetLP calls exhausted the
+// per-call traversal budget (MaxVisitedEntries) since process start.
+func TraversalBudgetExceeded() uint64 { return budgetExceededCalls.Load() }
+
+// maxMemoFreeURLLen (2026-10-08 P6 memo): URLs at or below this length are
+// traversed WITHOUT the (node, offset) memoization map — the common short
+// request pays zero extra cost per visit. Longer URLs enable memoization
+// from the first visit. Enabling or disabling memoization never changes
+// results: a repeat (node, offset) entry collects only values already in
+// the dedup map (inserted, in the same relative order, by the pair's first
+// entry), so any subset of repeat-skips preserves the output sequence
+// bit-for-bit — the gate is a pure performance valve, not a semantic switch.
+const maxMemoFreeURLLen = 256
 
 func New[T Data]() *Tree[T] {
 	return &Tree[T]{
@@ -137,6 +172,18 @@ func (n *node[T]) advancePrefix(k int) {
 //
 // The URL is expected to be a valid URL with scheme and host.
 func (t *Tree[T]) Get(url string) []T {
+	// 2026-10-08 P6 memo: Get delegates to GetLP. Both produce the same
+	// deterministic first-occurrence sequence (same traversal order, same
+	// dedup semantics — asserted by TestP6RuleTreeDeterminism's Get≡GetLP
+	// check), and delegation gives Get the (node, offset) memoization that
+	// keeps combinatorial URLs bounded.
+	return t.GetLP(url)
+}
+
+// getLegacy is the pre-delegation body of Get (map-per-sub-traversal merge),
+// retained unused as the reference implementation for audit comparison;
+// Get now delegates to GetLP (identical first-occurrence sequence).
+func (t *Tree[T]) getLegacy(url string) []T {
 	seen := make(map[T]struct{})
 	result := make([]T, 0)
 
@@ -198,7 +245,13 @@ const maxPooledAccEntries = 8192
 //     appended one copy per position and let a 68 KB URL grow the
 //     accumulator to ~180 MB per store (leak_capture heap_2.txt /
 //     goroutine_2.txt; CPU 3.9 cores + 2.1 GB resident), and
-//   - the accumulator and the dedup map served from per-tree sync.Pools.
+//   - the accumulator and the dedup map served from per-tree sync.Pools, and
+//   - (2026-10-08 P6 memo) for URLs longer than maxMemoFreeURLLen, a pooled
+//     (node, offset) visited map so each sub-traversal runs at most once —
+//     combinatorial URLs (dense traversal markers × wildcard subtrees, e.g.
+//     a 1017-char alicdn "??,..." combo URL) previously re-walked the same
+//     subtrees from hundreds of starting offsets and exceeded 15 s; the
+//     memoization skips only accumulator-neutral repeats (semantic no-op).
 //
 // The returned slice is freshly allocated, exactly like Get. GetLP may run
 // concurrently with itself and with Get; the same Insert/Compact exclusion
@@ -207,6 +260,8 @@ func (t *Tree[T]) GetLP(url string) []T {
 	t.lpOnce.Do(func() {
 		t.accPool.New = func() any { return new([]T) }
 		t.mapPool.New = func() any { return make(map[T]struct{}, 64) }
+		t.visPool.New = func() any { return make(map[vKey[T]]struct{}) }
+		t.tailPool.New = func() any { return make(map[*node[T]]int) }
 	})
 
 	accp := t.accPool.Get().(*[]T)
@@ -215,7 +270,21 @@ func (t *Tree[T]) GetLP(url string) []T {
 	m := t.mapPool.Get().(map[T]struct{})
 	clear(m)
 
-	tr := traverser[T]{data: acc, dedup: m}
+	// (node, offset) memoization (2026-10-08 P6): enabled only above
+	// maxMemoFreeURLLen so the common short request pays nothing. Pure
+	// performance valve — repeat entries are accumulator-neutral, see the
+	// traverser.visited and maxMemoFreeURLLen comments.
+	memoOn := len(url) > maxMemoFreeURLLen
+	var vis map[vKey[T]]struct{}
+	var tailMin map[*node[T]]int
+	if memoOn {
+		vis = t.visPool.Get().(map[vKey[T]]struct{})
+		clear(vis)
+		tailMin = t.tailPool.Get().(map[*node[T]]int)
+		clear(tailMin)
+	}
+
+	tr := traverser[T]{data: acc, dedup: m, base: url, visited: vis, tailMin: tailMin}
 	tr.visit(t.anchorRoot, url)
 	tr.visit(t.root, url)
 
@@ -261,6 +330,12 @@ func (t *Tree[T]) GetLP(url string) []T {
 	}
 	if len(m) <= maxPooledAccEntries {
 		t.mapPool.Put(m)
+	}
+	if memoOn && len(vis) <= maxPooledAccEntries {
+		t.visPool.Put(vis)
+	}
+	if memoOn && len(tailMin) <= maxPooledAccEntries {
+		t.tailPool.Put(tailMin)
 	}
 	return result
 }

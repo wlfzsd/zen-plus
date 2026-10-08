@@ -1,8 +1,7 @@
 package ruletree_test
 
-// P6 批（遍历确定性）专用用例——自 cb_P6 沙箱按同口径移植（2026-10-08）。
-// 批次沙箱内"禁改 diffharness_test.go / probe_test.go"的约束不适用于本树；
-// 本文件含：
+// P6 批（遍历确定性）专用用例。禁改 diffharness_test.go / probe_test.go；
+// 本文件新增：
 //  1. TestP6RuleTreeDeterminism  —— 同 URL 1000 次 Get/GetLP，胜出候选序列必须完全一致
 //     （SA-A 审计：map 去重导致同二进制两跑胜出规则身份漂移）。
 //  2. TestP6RuleTreeConcurrent   —— 并发 GetLP 下结果仍逐次一致（池化安全复核，-race 下更有价值）。
@@ -682,11 +681,8 @@ func TestP6EngineLongURLBoundedCost(t *testing.T) {
 	}
 }
 
-// ---------- 5. 基准（P6 前后对比门禁；与上游 ruletree_benchmark_test.go 的
-// BenchmarkMatch 同目的但工作负载不同，改名避让既有声明） ----------
+// ---------- 5. 基准（P6 前后对比门禁） ----------
 
-// BenchmarkP6TreeMatch 是 cb_P6 沙箱内 BenchmarkMatch 的移植（上游既有
-// BenchmarkMatch 走真实 easylist/urls 语料，见 ruletree_benchmark_test.go）。
 func BenchmarkP6TreeMatch(b *testing.B) {
 	tree := ruletree.New[string]()
 	for i := 0; i < 300; i++ {
@@ -721,4 +717,137 @@ func BenchmarkP6TreeMatch(b *testing.B) {
 			_ = tree.Get(urls[i%len(urls)])
 		}
 	})
+}
+
+// ---------- 4d. 组合 URL 对抗门禁（记忆化＋预算，回归任务追加） ----------
+
+// p6AlicdnURL：真实复现形态（alicdnprobe 同源），1017 字符，`??`+逗号密集分隔。
+const p6AlicdnURL = `https://astyle.alicdn.com/??fdevlib/js/lofty/util/webp/1.0/webp.js,fdevlib/js/lofty/util/template/2.0/tplhandler.js,fdevlib/js/lofty/util/misc/2.0/misc.js,fdevlib/js/lofty/util/misc/1.0/misc.js,fdevlib/js/lofty/util/json/1.0/json.js,fdevlib/js/lofty/util/exposure/1.0/exposure.js,fdevlib/js/lofty/util/datalazyload/2.0/datalazyload.js,fdevlib/js/lofty/util/cookie/1.0/cookie.js,fdevlib/js/lofty/util/cms-vm/1.0/cms-vm-jsonp.js,fdevlib/js/lofty/ui/widget/1.0/widget.js,fdevlib/js/lofty/ui/tabs/2.0/tabs.js,fdevlib/js/lofty/alicn/subcookie/1.0/subcookie.js,fdevlib/js/lofty/alicn/everlog/1.0/everlog.js,fdevlib/js/lofty/alicn/aliuser/1.0/aliuser.js,fdevlib/js/lofty/alicn/alitalk/1.0/alitalk-shunt.js,pkg/@alife/lofty-xdutil/1.0.0/index.js,pkg/@alife/lofty-xdutil/1.0.0/crossdomain.js,pkg/@alife/lofty-json/1.0.0/index.js,fdevlib/js/app/link/plugin/i18n/1.0/i18n.js,pkg/@alife/art-mould/1.1.x/fmd.js,pkg/@alife/refly-wk-store/0.0.7/index.js,pkg/@alife/refly-request/0.2.x/index.js?_v=442e2630fdf2640b79da6d61abb1a111.js`
+
+// TestP6AlicdnComboURLBoundedTime：组合 URL（1017 字符，真实复现形态）在通配符
+// 重压树上 GetLP 与引擎 ModifyReq 均 <50ms（修复前 15s 无法完成）＋内存增量有界。
+func TestP6AlicdnComboURLBoundedTime(t *testing.T) {
+	tree := ruletree.New[string]()
+	for i := 0; i < 60; i++ {
+		tree.Insert(fmt.Sprintf("*q%03d*", i), fmt.Sprintf("R%03d", i))
+	}
+	tree.Insert("*a*b*", "AB")
+	tree.Insert("*util*", "UTIL")
+	tree.Insert("*js*", "JS")
+
+	u := p6AlicdnURL
+	if len(u) != 1017 {
+		t.Fatalf("URL 长度漂移: %d", len(u))
+	}
+	for i := 0; i < 3; i++ { // 预热
+		tree.GetLP(u)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	got := tree.GetLP(u)
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	perCall := after.TotalAlloc - before.TotalAlloc
+	t.Logf("ruletree GetLP(alicdn): %v, 候选 %d, 单次分配 %d B", elapsed, len(got), perCall)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("GetLP 耗时超界: %v > 50ms", elapsed)
+	}
+	if perCall > 4<<20 {
+		t.Fatalf("内存增量超界: %d B > 4MB", perCall)
+	}
+
+	// 引擎级真实复现路径（youtube 6 列表引擎）
+	nr, err := p6YTLoader(t)
+	if err != nil {
+		t.Skipf("列表不可载入：%v", err)
+	}
+	r := httptest.NewRequest("GET", u, nil)
+	r.Header.Set("Sec-Fetch-Dest", "script")
+	r.Header.Set("Referer", "https://www.taobao.com/")
+	start = time.Now()
+	_, block, redirect := nr.ModifyReq(r)
+	engElapsed := time.Since(start)
+	outcome := "allow"
+	if block {
+		outcome = "BLOCK"
+	} else if redirect != "" {
+		outcome = "redirect"
+	}
+	t.Logf("引擎 ModifyReq(alicdn): %v → %s", engElapsed, outcome)
+	if engElapsed > 50*time.Millisecond {
+		t.Fatalf("引擎耗时超界: %v > 50ms", engElapsed)
+	}
+}
+
+// TestP6DenseSeparator4000：自造 4000 字符分隔符密集 URL，断言 <50ms 与内存有界。
+func TestP6DenseSeparator4000(t *testing.T) {
+	tree := ruletree.New[string]()
+	for i := 0; i < 60; i++ {
+		tree.Insert(fmt.Sprintf("*q%03d*", i), fmt.Sprintf("R%03d", i))
+	}
+	tree.Insert("*a*b*", "AB")
+	tree.Insert("*js*", "JS")
+	u := p6AdversarialURL(4000)
+	for i := 0; i < 3; i++ {
+		tree.GetLP(u)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	tree.GetLP(u)
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	perCall := after.TotalAlloc - before.TotalAlloc
+	t.Logf("GetLP(4000 密集): %v, 单次分配 %d B", elapsed, perCall)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("耗时超界: %v > 50ms", elapsed)
+	}
+	if perCall > 4<<20 {
+		t.Fatalf("内存增量超界: %d B > 4MB", perCall)
+	}
+}
+
+// TestP6TraversalBudgetFailOpen：把 MaxVisitedEntries 调到 500，构造能超预算
+// 的组合 URL，断言：完成＋fail-open（结果为合法子集判定）＋原子计数递增。
+func TestP6TraversalBudgetFailOpen(t *testing.T) {
+	old := ruletree.MaxVisitedEntries
+	ruletree.MaxVisitedEntries = 500
+	defer func() { ruletree.MaxVisitedEntries = old }()
+
+	tree := ruletree.New[string]()
+	for i := 0; i < 60; i++ {
+		tree.Insert(fmt.Sprintf("*q%03d*", i), fmt.Sprintf("R%03d", i))
+	}
+	tree.Insert("*a*b*", "AB")
+	tree.Insert("*js*", "JS")
+	u := p6AdversarialURL(4000)
+
+	before := ruletree.TraversalBudgetExceeded()
+	start := time.Now()
+	got := tree.GetLP(u)
+	elapsed := time.Since(start)
+	after := ruletree.TraversalBudgetExceeded()
+	t.Logf("预算触发测试: %v, 候选 %d（预算前计数 %d → 后 %d）", elapsed, len(got), before, after)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("预算兜底后仍超时: %v", elapsed)
+	}
+	if after <= before {
+		t.Fatalf("预算未触发：计数未递增（%d → %d）", before, after)
+	}
+	// fail-open 语义：结果仍合法（无重复、无 panic）
+	seen := map[string]struct{}{}
+	for _, v := range got {
+		if _, dup := seen[v]; dup {
+			t.Fatalf("fail-open 结果含重复项 %q", v)
+		}
+		seen[v] = struct{}{}
+	}
+	ruletree.MaxVisitedEntries = 1_000_000 // 恢复后验证预算未污染正常路径
+	full := tree.GetLP(u)
+	if len(full) < len(got) {
+		t.Fatalf("预算内结果不应多于完整结果")
+	}
 }
