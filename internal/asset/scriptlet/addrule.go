@@ -3,8 +3,10 @@ package scriptlet
 import (
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var (
@@ -120,6 +122,90 @@ func normalizeScriptletName(name string) string {
 	return normalized
 }
 
+// [P3 2026-10-08] knownScriptletNames mirrors the dispatch table of the
+// bundled scriptlet engine: the 44 keys of the "new Map([[...]])" table at
+// the tail of bundle.js (canonical names and the raw short keys the bundle
+// registers directly, in bundle order). A stored rule whose normalized name
+// is absent from this list has no implementation and runs inert; AddRule
+// reports it once (comp_audit TOP-5 observability).
+var knownScriptletNames = []string{
+	"abort-current-inline-script",
+	"abort-on-property-read",
+	"aopr",
+	"abort-on-property-write",
+	"aopw",
+	"abort-on-stack-trace",
+	"aost",
+	"json-prune",
+	"nowebrtc",
+	"prevent-fetch",
+	"no-fetch-if",
+	"prevent-xhr",
+	"no-xhr-if",
+	"set-local-storage-item",
+	"set-session-storage-item",
+	"set-constant",
+	"json-prune-fetch-response",
+	"json-prune-xhr-response",
+	"prevent-window-open",
+	"nowoif",
+	"prevent-setTimeout",
+	"prevent-setInterval",
+	"prevent-addEventListener",
+	"no-topics",
+	"no-protected-audience",
+	"sanitize-clipboard",
+	"prevent-element-src-loading",
+	"remove-node-text",
+	"remove-attr",
+	"remove-class",
+	"set-attr",
+	"set-cookie",
+	"set-cookie-reload",
+	"remove-cookie",
+	"prevent-eval-if",
+	"prevent-refresh",
+	"adjust-setTimeout",
+	"adjust-setInterval",
+	"prevent-innerHTML",
+	"prevent-navigation",
+	"log",
+	"log-eval",
+	"log-addEventListener",
+	"log-on-stack-trace",
+}
+
+func isKnownScriptletName(name string) bool {
+	for _, n := range knownScriptletNames {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// [P3 2026-10-08] warnedScriptletNames deduplicates the inert-name warning so
+// a recurring unknown rule cannot flood the log; each distinct normalized
+// name is reported once per process.
+var warnedScriptletNames sync.Map
+
+// warnInertScriptlet logs a stored rule whose normalized name has no
+// implementation. Trusted-prefixed names get their own wording; the trusted-
+// decision runs on the normalized name (AddRule normalized args[0] earlier).
+func warnInertScriptlet(name string) {
+	if isKnownScriptletName(name) {
+		return
+	}
+	if _, loaded := warnedScriptletNames.LoadOrStore(name, struct{}{}); loaded {
+		return
+	}
+	if strings.HasPrefix(name, trustedPrefix) {
+		log.Printf("trusted scriptlet not yet implemented: %q (rule inert)", name)
+		return
+	}
+	log.Printf("scriptlet %q has no implementation (rule inert)", name)
+}
+
 func (inj *Injector) AddRule(rule string, filterListTrusted bool) error {
 	var body string
 	var isUblock, isException bool
@@ -176,6 +262,13 @@ func (inj *Injector) AddRule(rule string, filterListTrusted bool) error {
 	al, err := newArgList(args)
 	if err != nil {
 		return fmt.Errorf("encode argument list: %v", err)
+	}
+
+	// [P3 2026-10-08] 可观测性：走到这里的规则已确定入库，但名字若不在
+	// bundle 分发表里则运行期惰性（bundle 只 debug 一句）。按归一化名
+	// 去重记 warn（comp_audit TOP-5）；trusted-* 判定基于归一化后的名字。
+	if len(args) > 0 {
+		warnInertScriptlet(args[0])
 	}
 
 	switch isException {
