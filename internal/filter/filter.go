@@ -2,6 +2,7 @@ package filter
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -412,7 +413,7 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 		taplog.Log(reqLogFields("modify", req, initialURL, appliedRules, processInfo))
 	}
 
-	if len(appliedRules) == 0 && taplog.WatchedHost(initialURL.Hostname()) {
+	if len(appliedRules) == 0 {
 		taplog.Log(reqLogFields("allow", req, initialURL, nil, processInfo))
 	}
 
@@ -453,6 +454,18 @@ func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processIn
 		}
 	}
 
+	// [2026-10-08 采集 v3] jsonprune 覆盖缺口取证：转储 player 响应原始体。
+	// 读前 1MB 落盘，剩余部分用 MultiReader 原样续传，不改变响应流。
+	if taplog.Enabled() && req.URL != nil && strings.HasPrefix(req.URL.Path, "/youtubei/v1/") && res.Body != nil {
+		buf, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		taplog.DumpPlayerBody(req.URL.String(), buf)
+		if len(buf) < 1<<20 {
+			res.Body = io.NopCloser(bytes.NewReader(buf))
+		} else {
+			res.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buf), res.Body), Closer: res.Body}
+		}
+	}
+
 	appliedRules, err := f.networkRules.ModifyRes(req, res)
 	if err != nil {
 		taplog.Log(resLogFields("error", req, res, nil, err))
@@ -464,6 +477,12 @@ func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processIn
 	}
 
 	return nil
+}
+
+// readCloser 组合 Reader 与 Closer：转储后把未读部分原样续传给响应流。
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func isDocumentNavigation(req *http.Request, res *http.Response) bool {

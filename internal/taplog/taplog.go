@@ -14,10 +14,12 @@ package taplog
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -130,4 +132,34 @@ func WithFacts(ctx context.Context, f Facts) context.Context {
 func FactsFromContext(ctx context.Context) (Facts, bool) {
 	f, ok := ctx.Value(factsKey{}).(Facts)
 	return f, ok
+}
+
+// ── [2026-10-08 采集 v3] player 响应体转储（jsonprune 覆盖缺口取证）──────────
+// 仅在 ZEN_DECISION_LOG=1 时工作：把 /youtubei/v1/ 前缀响应的 body 前
+// bodyDumpLimit 字节落到 bodies 子目录，供离线分析"广告配置藏在哪个结构里"。
+// 每会话上限 bodyDumpMaxFiles 个文件，超限静默跳过。
+const (
+	bodyDumpLimit    = 1 << 20 // 1 MiB per response
+	bodyDumpMaxFiles = 80
+)
+
+var bodyDumpSeq int64
+
+func DumpPlayerBody(url string, body []byte) {
+	if !Enabled() {
+		return
+	}
+	if bodyDumpSeq >= bodyDumpMaxFiles {
+		return
+	}
+	dir := filepath.Join(filepath.Dir(file.Name()), "bodies")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	n := atomic.AddInt64(&bodyDumpSeq, 1)
+	name := filepath.Join(dir, fmt.Sprintf("%03d.json", n))
+	meta := map[string]any{"url": url, "len": len(body)}
+	mb, _ := json.Marshal(meta)
+	header := append(mb, '\n')
+	_ = os.WriteFile(name, append(header, body...), 0o644)
 }
