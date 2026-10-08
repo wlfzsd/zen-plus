@@ -21,6 +21,7 @@ import (
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 	"github.com/irbis-sh/zen-desktop/internal/process"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
+	"github.com/irbis-sh/zen-desktop/internal/taplog"
 )
 
 // filterActionObserver observes filter events.
@@ -382,6 +383,7 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 	appliedRules, shouldBlock, redirectURL := f.networkRules.ModifyReq(req)
 	if shouldBlock {
 		f.actionObserver.OnFilterBlock(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		taplog.Log(reqLogFields("block", req, initialURL, appliedRules, processInfo))
 
 		if fetchmeta.IsUserNavigation(req) {
 			port := f.whitelistSrv.GetPort()
@@ -401,11 +403,17 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 
 	if redirectURL != "" {
 		f.actionObserver.OnFilterRedirect(req.Method, initialURL.String(), redirectURL, req.Header.Get("Referer"), appliedRules, processInfo)
+		taplog.Log(reqLogFields("redirect", req, initialURL, appliedRules, processInfo))
 		return f.networkRules.CreateRedirectResponse(req, redirectURL), nil
 	}
 
 	if len(appliedRules) > 0 {
 		f.actionObserver.OnFilterModify(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		taplog.Log(reqLogFields("modify", req, initialURL, appliedRules, processInfo))
+	}
+
+	if len(appliedRules) == 0 && taplog.WatchedHost(initialURL.Hostname()) {
+		taplog.Log(reqLogFields("allow", req, initialURL, nil, processInfo))
 	}
 
 	return nil, nil
@@ -447,10 +455,12 @@ func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processIn
 
 	appliedRules, err := f.networkRules.ModifyRes(req, res)
 	if err != nil {
+		taplog.Log(resLogFields("error", req, res, nil, err))
 		return fmt.Errorf("apply network rules: %v", err)
 	}
 	if len(appliedRules) > 0 {
 		f.actionObserver.OnFilterModify(req.Method, req.URL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		taplog.Log(resLogFields("modify", req, res, appliedRules, nil))
 	}
 
 	return nil
@@ -476,4 +486,65 @@ func isDocumentNavigation(req *http.Request, res *http.Response) bool {
 	}
 
 	return true
+}
+
+// reqLogFields builds one decision-tap payload for a request outcome
+// (2026-10-08 reproduction diagnostics; no-op unless ZEN_DECISION_LOG=1).
+func reqLogFields(decision string, req *http.Request, initialURL *url.URL, rules []rule.Rule, processInfo process.Info) map[string]any {
+	fld := map[string]any{
+		"kind":     "req",
+		"decision": decision,
+		"method":   req.Method,
+		"url":      initialURL.String(),
+		"host":     initialURL.Hostname(),
+		"referer":  req.Header.Get("Referer"),
+	}
+	if facts, ok := taplog.FactsFromContext(req.Context()); ok {
+		fld["inbound_h2"] = facts.InboundH2
+	}
+	if processInfo.PID != 0 {
+		fld["pid"] = processInfo.PID
+		if name, err := processInfo.Name(); err == nil {
+			fld["pname"] = name
+		}
+	}
+	return appendRuleFields(fld, rules)
+}
+
+// resLogFields builds one decision-tap payload for a response outcome.
+func resLogFields(decision string, req *http.Request, res *http.Response, rules []rule.Rule, err error) map[string]any {
+	fld := map[string]any{
+		"kind":     "res",
+		"decision": decision,
+		"method":   req.Method,
+		"url":      req.URL.String(),
+		"host":     req.URL.Hostname(),
+		"status":   res.StatusCode,
+		"ctype":    res.Header.Get("Content-Type"),
+	}
+	if res.ContentLength != 0 {
+		fld["clen"] = res.ContentLength
+	}
+	if err != nil {
+		fld["err"] = err.Error()
+	}
+	return appendRuleFields(fld, rules)
+}
+
+// appendRuleFields adds the applied rules (raw text + source list) to a
+// decision-tap payload.
+func appendRuleFields(fld map[string]any, rules []rule.Rule) map[string]any {
+	if len(rules) == 0 {
+		return fld
+	}
+	raws := make([]string, len(rules))
+	for i, r := range rules {
+		if r.FilterName != nil {
+			raws[i] = *r.FilterName + " :: " + r.RawRule
+		} else {
+			raws[i] = r.RawRule
+		}
+	}
+	fld["rules"] = raws
+	return fld
 }

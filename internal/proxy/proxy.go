@@ -21,6 +21,7 @@ import (
 
 	"github.com/irbis-sh/zen-desktop/internal/process"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
+	"github.com/irbis-sh/zen-desktop/internal/taplog"
 )
 
 const (
@@ -440,6 +441,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 	isLocal := p.isLocalEndpoint(host)
 
 	if !isLocal && !shouldProxy {
+		taplogConn(host, "tunnel", "routing-not-selected")
 		p.tunnel(clientConn, connReq)
 		return
 	}
@@ -447,6 +449,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 	if !isLocal && (!p.shouldMITM(host) || net.ParseIP(host) != nil) {
 		// TODO: implement upstream certificate sniffing
 		// https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/#complication-1-whats-the-remote-hostname
+		taplogConn(host, "tunnel", "latched-or-ip-literal")
 		p.tunnel(clientConn, connReq)
 		return
 	}
@@ -492,11 +495,13 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
 		if !isLocal && isTLSError(err) {
 			log.Printf("adding %s to ignored hosts", redacted.Redacted(host))
+			taplog.Log(map[string]any{"kind": "latch", "host": host, "leg": "inbound", "err": err.Error()})
 			p.addTransparentHost(host)
 		}
 		log.Printf("TLS handshake(%s): %v", redacted.Redacted(connReq.Host), err)
 		return
 	}
+	taplogConn(host, "mitm", "")
 
 	ln := newSingleConnListener(tlsConn)
 
@@ -567,6 +572,7 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 		req.URL.Scheme = "https"
 		req.RequestURI = ""
 		req.Close = false
+		req = req.WithContext(taplog.WithFacts(req.Context(), taplog.Facts{InboundH2: facts.inboundH2}))
 
 		// Filter request, before upgrading to websockets, to match/block wss:// handshake
 		filterResp, err := p.filter.HandleRequest(req, processInfo)
@@ -648,8 +654,12 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 		roundTripDone = true
 		roundTripMutex.Unlock()
 		if err != nil {
+			if taplog.WatchedHost(host) {
+				taplog.Log(map[string]any{"kind": "rt_error", "host": host, "err": err.Error()})
+			}
 			if isTLSError(err) {
 				log.Printf("adding %s to ignored hosts", redacted.Redacted(host))
+				taplog.Log(map[string]any{"kind": "latch", "host": host, "leg": "outbound", "err": err.Error()})
 				p.addTransparentHost(host)
 			}
 			log.Printf("roundtrip(%s): %v", redacted.Redacted(connReq.Host), err)
@@ -833,6 +843,17 @@ func headerContains(h http.Header, name, value string) bool {
 // as a signal that a host cannot be MITM'd and should be tunnelled transparently.
 func isTLSError(err error) bool {
 	return strings.Contains(err.Error(), "tls: ")
+}
+
+// taplogConn emits one connection-mode fact for host to the decision tap
+// (2026-10-08 reproduction diagnostics; no-op unless ZEN_DECISION_LOG=1).
+// Recorded for watched hosts only: the tunnel modes are exactly the states
+// in which nothing is filtered, and latch events are logged separately with
+// no host filter.
+func taplogConn(host, mode, reason string) {
+	if taplog.WatchedHost(host) {
+		taplog.Log(map[string]any{"kind": "conn", "host": host, "mode": mode, "reason": reason})
+	}
 }
 
 // isCloseable returns true if the error is one that indicates the connection
