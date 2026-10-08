@@ -98,7 +98,23 @@ func (m *ContentTypeModifier) ShouldMatchReq(req *http.Request) bool {
 	return contentType == m.contentType
 }
 
-func (m *ContentTypeModifier) ShouldMatchRes(res *http.Response) bool {
+// ShouldMatchRes evaluates the content-type condition for the response
+// produced by req.
+//
+// 2026-10-08 (B10-C): the $xmlhttprequest member is decided by the request's
+// Fetch Metadata when present (docs L1046-1058: $xmlhttprequest denotes ajax
+// requests and only fetch metadata detects them reliably — a response
+// Content-Type such as application/json cannot distinguish an XHR response
+// from a top-level navigation; L868-876: request-side metadata first,
+// Content-Type fallback). When the request carries no Sec-Fetch-Dest (or
+// req is nil), the pre-B10 Content-Type logic below applies unchanged.
+func (m *ContentTypeModifier) ShouldMatchRes(req *http.Request, res *http.Response) bool {
+	if m.contentType == "xmlhttprequest" && req != nil {
+		if dest := req.Header.Get("Sec-Fetch-Dest"); dest != "" {
+			return (dest == "empty") != m.inverted
+		}
+	}
+
 	mimeType := m.getMimeType(res.Header)
 	if mimeType == "" {
 		return false
