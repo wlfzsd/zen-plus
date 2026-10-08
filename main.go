@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -81,6 +83,17 @@ func main() {
 	startHidden := flag.Bool("hidden", false, "Start the application in hidden mode")
 	uninstallCA := flag.Bool("uninstall-ca", false, "Uninstall the CA and exit")
 	flag.Parse()
+
+	// 2026-10-08 诊断插桩（临时）：ZEN_PPROF=1 时在 127.0.0.1:6399 暴露 pprof，
+	// 用于定位 CPU/内存回归；默认完全关闭，生产行为不变。
+	if os.Getenv("ZEN_PPROF") == "1" {
+		go func() {
+			log.Println("diagnostic pprof listening on 127.0.0.1:6399")
+			if err := http.ListenAndServe("127.0.0.1:6399", nil); err != nil {
+				log.Printf("diagnostic pprof exited: %v", err)
+			}
+		}()
+	}
 
 	err := logger.SetupLogger()
 	if err != nil {
