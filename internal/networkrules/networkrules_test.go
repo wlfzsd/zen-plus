@@ -440,6 +440,75 @@ func TestExceptionRules(t *testing.T) {
 			t.Fatal("expected important exception to cancel important primary rule")
 		}
 	})
+
+	// 2026-10-08 (regression fix): an action/query-scoped exception is
+	// scoped to its action/query (docs 1119) — its $document flag must not
+	// add the page-level elemhide/jsinject components of ActiveExceptions.
+	// The real-world rule below (DandelionSprout URL Shortener list, empty
+	// pattern → matches every URL) previously exempted elemhide+jsinject on
+	// EVERY site, silently disabling all scriptlet/cosmetic injection and
+	// causing the YouTube ad regression.
+	t.Run("action-query-scoped document exception grants no exemptions", func(t *testing.T) {
+		t.Parallel()
+
+		nr := New()
+		if _, err := nr.ParseRule(`@@$doc,removeparam=/^.*_dest_url=.*$/`, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		req := newTestRequest(t, "https://www.youtube.com/watch?v=x&utm_source=a&_dest_url=https%3A%2F%2Fexample.com", nil)
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		ex := nr.ActiveExceptions(req)
+		if ex.Elemhide || ex.Jsinject || ex.Generichide || ex.Specifichide {
+			t.Fatalf("action/query-scoped $document exception must grant no exemptions, got %+v", ex)
+		}
+	})
+
+	// Positive control: a real $document exception (no action/query
+	// modifiers) keeps granting elemhide+jsinject on its match.
+	t.Run("document exception still grants elemhide and jsinject", func(t *testing.T) {
+		t.Parallel()
+
+		nr := New()
+		if _, err := nr.ParseRule(`@@||whitelist.example^$document`, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		req := newTestRequest(t, "https://sub.whitelist.example/page", nil)
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		ex := nr.ActiveExceptions(req)
+		if !ex.Elemhide || !ex.Jsinject {
+			t.Fatalf("expected elemhide+jsinject for a $document exception match, got %+v", ex)
+		}
+	})
+
+	// The AdGuard Base youtube rules: $generichide alone must leave
+	// scriptlet injection (jsinject) untouched, and the same must hold on
+	// watch/search pages.
+	t.Run("generichide exception does not disable jsinject", func(t *testing.T) {
+		t.Parallel()
+
+		nr := New()
+		if _, err := nr.ParseRule(`@@||www.youtube.com^$generichide`, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, rawURL := range []string{
+			"https://www.youtube.com/",
+			"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			"https://www.youtube.com/results?search_query=test",
+		} {
+			req := newTestRequest(t, rawURL, nil)
+			req.Header.Set("Sec-Fetch-Dest", "document")
+			ex := nr.ActiveExceptions(req)
+			if !ex.Generichide {
+				t.Fatalf("expected generichide for %s, got %+v", rawURL, ex)
+			}
+			if ex.Elemhide || ex.Jsinject || ex.Specifichide {
+				t.Fatalf("generichide must not carry other exemptions for %s, got %+v", rawURL, ex)
+			}
+		}
+	})
 }
 
 func newTestRequest(t *testing.T, rawURL string, headers http.Header) *http.Request {

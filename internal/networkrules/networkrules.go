@@ -294,10 +294,20 @@ func (nr *NetworkRules) ActiveExceptions(req *http.Request) exemption.Exemption 
 		if !er.ShouldMatchReq(req) {
 			continue
 		}
-		if er.Elemhide || er.Document {
+		// 2026-10-08 (regression fix): action/query-scoped exceptions
+		// (docs 1119, IsActionQueryScoped) carry only their action/query
+		// effects — their $document flag must not add the page-level
+		// elemhide/jsinject components, exactly like Cancels/HasPageScope/
+		// HasResPageScope. Real-world case: the URL Shortener list's
+		// @@$doc,removeparam=/^.*_dest_url=.*$/ has an empty pattern, so it
+		// matched every URL and exempted elemhide+jsinject on EVERY site,
+		// silently disabling all scriptlet/cosmetic injection (the YouTube
+		// ad regression of 2026-10-08).
+		docScoped := er.Document && !er.IsActionQueryScoped()
+		if er.Elemhide || docScoped {
 			ex.Elemhide = true
 		}
-		if er.Jsinject || er.Document {
+		if er.Jsinject || docScoped {
 			ex.Jsinject = true
 		}
 		if er.Generichide {

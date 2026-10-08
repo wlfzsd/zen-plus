@@ -154,6 +154,19 @@ func (er *ExceptionRule) hasActionQueryMods() bool {
 	return len(er.ActionModifiers()) > 0 || len(er.QueryModifiers()) > 0
 }
 
+// IsActionQueryScoped reports whether the exception carries action or query
+// modifiers and is therefore scoped to those actions/queries (docs 1119):
+// its $document/$all flags add no page-level effects. Exported for
+// NetworkRules.ActiveExceptions, which must skip the elemhide/jsinject
+// components of $document for such exceptions — an empty-pattern rule like
+// @@$doc,removeparam=/^.*_dest_url=.*$/ matches every URL and previously
+// exempted elemhide+jsinject on EVERY site, killing all asset injection
+// (2026-10-08 regression fix; semantics must stay in lockstep with
+// hasActionQueryMods, Cancels, HasPageScope and HasResPageScope).
+func (er *ExceptionRule) IsActionQueryScoped() bool {
+	return er.hasActionQueryMods()
+}
+
 // Cancels reports whether this exception — already matched to the request by
 // URL pattern and condition modifiers (ShouldMatchReq) — cancels applying
 // rule r to that request.
