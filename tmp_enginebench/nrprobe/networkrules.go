@@ -168,11 +168,11 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	if nr.LowAlloc {
 		defer nr.primaryStore.putRes(primaryRules)
 		primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
-			return r.ShouldMatchRes(res)
+			return r.ShouldMatchRes(req, res)
 		})
 	} else {
 		primaryRules = filter(primaryRules, func(r *rule.Rule) bool {
-			return r.ShouldMatchRes(res)
+			return r.ShouldMatchRes(req, res)
 		})
 	}
 	if len(primaryRules) == 0 {
@@ -183,11 +183,11 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	if nr.LowAlloc {
 		defer nr.exceptionStore.putRes(exceptions)
 		exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-			return er.ShouldMatchRes(res)
+			return er.ShouldMatchRes(req, res)
 		})
 	} else {
 		exceptions = filter(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-			return er.ShouldMatchRes(res)
+			return er.ShouldMatchRes(req, res)
 		})
 	}
 

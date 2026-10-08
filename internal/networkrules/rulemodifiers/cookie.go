@@ -203,6 +203,7 @@ func (cm *CookieModifier) ModifyRes(res *http.Response) (modified bool, err erro
 //   - a bare @@…$cookie cancels every $cookie rule (all cookies);
 //   - @@…$cookie=NAME cancels a rule matching the same exact name;
 //   - @@…$cookie=/re/ cancels a rule with the same regular expression.
+//
 // regexpPattern returns the cached pattern string, lazily filling the
 // cache for modifiers constructed without going through Parse (tests).
 // (2026-10-08, perf)
@@ -283,6 +284,42 @@ func (cm *CookieModifier) rewriteSetCookie(sc string) string {
 	// The name=value pair is kept verbatim; attributes are rebuilt with the
 	// canonical "; " separator.
 	return parts[0] + "; " + strings.Join(kept, "; ")
+}
+
+// CookieMatchKind classifies a $cookie modifier's name matching form
+// (2026-10-08, B10: read-only view for the networkrules action index).
+type CookieMatchKind uint8
+
+const (
+	// CookieMatchGeneric is a bare $cookie (all cookies).
+	CookieMatchGeneric CookieMatchKind = iota
+	// CookieMatchExact matches one cookie name byte-exactly.
+	CookieMatchExact
+	// CookieMatchRegexp matches cookie names by regular expression.
+	CookieMatchRegexp
+)
+
+// MatchKind reports the modifier's name matching form.
+func (cm *CookieModifier) MatchKind() CookieMatchKind {
+	switch cm.kind {
+	case cookieKindExact:
+		return CookieMatchExact
+	case cookieKindRegexp:
+		return CookieMatchRegexp
+	default:
+		return CookieMatchGeneric
+	}
+}
+
+// ExactName returns the exact cookie name for CookieMatchExact modifiers.
+func (cm *CookieModifier) ExactName() string { return cm.name }
+
+// SetCookieName extracts the cookie name of a Set-Cookie header value.
+// Reports false if the value does not carry a name=value pair. Exported for
+// the networkrules action index, which must share the exact name extraction
+// of the evaluation path (single-parser principle, 2026-10-08 B10).
+func SetCookieName(sc string) (name string, ok bool) {
+	return setCookieName(sc)
 }
 
 // setCookieName extracts the cookie name of a Set-Cookie header value.

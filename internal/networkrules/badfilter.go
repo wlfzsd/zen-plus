@@ -136,6 +136,11 @@ func (nr *NetworkRules) applyBadfilters() {
 	nr.primaryStore.walkValues(func(r *rule.Rule) {
 		apply(r.RawRule, r)
 	})
+	// 2026-10-08 (B10-A): rules routed into the action index are not in the
+	// store — the walk must reach them or $badfilter would not disable them.
+	nr.actionIdx.walk(func(r *rule.Rule) {
+		apply(r.RawRule, r)
+	})
 	nr.exceptionStore.walkValues(func(er *exceptionrule.ExceptionRule) {
 		apply(er.RawRule, &er.Rule)
 	})
@@ -176,6 +181,10 @@ func (nr *NetworkRules) BadfilterAudit() BadfilterAudit {
 		}
 	}
 	nr.primaryStore.walkValues(func(r *rule.Rule) {
+		visit(r.RawRule, r.BadfilterDisableState())
+	})
+	// 2026-10-08 (B10-A): include the action-index rules in the audit.
+	nr.actionIdx.walk(func(r *rule.Rule) {
 		visit(r.RawRule, r.BadfilterDisableState())
 	})
 	nr.exceptionStore.walkValues(func(er *exceptionrule.ExceptionRule) {

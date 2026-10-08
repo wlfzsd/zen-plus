@@ -30,17 +30,43 @@ type NetworkRules struct {
 	// pageScopedExceptions.
 	frameScopedRules atomic.Int64
 
+	// actionIdx routes empty-pattern $cookie/$removeparam rules out of the
+	// generic bucket into name-keyed indexes; the hot paths prepend the
+	// applicable candidates ahead of the store candidates (2026-10-08 B10,
+	// actionindex.go). When disabled (WithActionIndex(false)) rules load
+	// into the store exactly as before B10.
+	actionIdx      matchAllActionIndex
+	actionIdxOn    bool
+	candScratchReq sync.Pool
+	candScratchRes sync.Pool
+
 	// badfilters holds $badfilter rules collected at parse time (see
 	// badfilter.go, 2026-10-08 B6). They are applied once in Compact, after
 	// every filter list was fully loaded, and never inserted into a store.
 	badfilters []badfilterRule
 }
 
-func New() *NetworkRules {
-	return &NetworkRules{
+// NetworkRulesOption customizes a NetworkRules at construction.
+type NetworkRulesOption func(*NetworkRules)
+
+// WithActionIndex enables (default) or disables the match-all action-rule
+// index (2026-10-08 B10). Disabled, empty-pattern $cookie/$removeparam rules
+// load into the generic bucket exactly as before B10 — the rollback switch
+// for the index.
+func WithActionIndex(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) { nr.actionIdxOn = enabled }
+}
+
+func New(opts ...NetworkRulesOption) *NetworkRules {
+	nr := &NetworkRules{
 		primaryStore:   newRuleStore[*rule.Rule](),
 		exceptionStore: newRuleStore[*exceptionrule.ExceptionRule](),
+		actionIdxOn:    true,
 	}
+	for _, opt := range opts {
+		opt(nr)
+	}
+	return nr
 }
 
 // maxMatchURLLen (2026-10-08 P6): AdGuard truncates URLs to 4096 characters
@@ -69,8 +95,12 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	// semantics); hoist the two header reads out of the per-rule evaluation.
 	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
 
-	primaryRules := nr.primaryStore.Get(reqURL)
-	defer nr.primaryStore.putRes(primaryRules)
+	storeRules := nr.primaryStore.Get(reqURL)
+	defer nr.primaryStore.putRes(storeRules)
+	primaryRules, reqScratch := nr.prependIndexedReq(storeRules, req)
+	if reqScratch != nil {
+		defer nr.putReqScratch(reqScratch)
+	}
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
 		return r.ShouldMatchReqNav(req, isUserNav)
 	})
@@ -236,8 +266,12 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	restrictFrames := nr.frameScopedRules.Load() > 0
 	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
 
-	primaryRules := nr.primaryStore.Get(url)
-	defer nr.primaryStore.putRes(primaryRules)
+	storeRules := nr.primaryStore.Get(url)
+	defer nr.primaryStore.putRes(storeRules)
+	primaryRules, resScratch := nr.prependIndexedRes(storeRules, res)
+	if resScratch != nil {
+		defer nr.putResScratch(resScratch)
+	}
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
 		if !r.ShouldMatchRes(req, res) {
 			return false

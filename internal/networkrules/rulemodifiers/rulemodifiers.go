@@ -99,18 +99,7 @@ var qsPool sync.Pool
 // per-rule loop preserves outcomes, since every ModifyQuery call would have
 // returned false anyway. The caller must ReleaseQueryState the result.
 func AcquireQueryState(req *http.Request) *QueryState {
-	if req.URL.RawQuery == "" {
-		return nil
-	}
-	switch strings.ToUpper(req.Method) {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		// Always eligible.
-	case http.MethodPost:
-		// Bodyless POST only (doc 2634 "sometimes POST").
-		if req.Body != nil && req.ContentLength != 0 {
-			return nil
-		}
-	default:
+	if !RemoveParamEligible(req) {
 		return nil
 	}
 	qs, _ := qsPool.Get().(*QueryState)

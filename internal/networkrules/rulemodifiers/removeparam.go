@@ -28,6 +28,66 @@ type RemoveParamModifier struct {
 	pattern string
 }
 
+// RemoveParamMatchKind classifies a $removeparam modifier's matching form
+// (2026-10-08, B10: read-only view for the networkrules action index).
+type RemoveParamMatchKind uint8
+
+const (
+	// RemoveParamMatchGeneric is a naked $removeparam (all parameters).
+	RemoveParamMatchGeneric RemoveParamMatchKind = iota
+	// RemoveParamMatchRegexp matches the normalized name=value text by
+	// regular expression.
+	RemoveParamMatchRegexp
+	// RemoveParamMatchRegexpInverse is the negated regexp form.
+	RemoveParamMatchRegexpInverse
+	// RemoveParamMatchExact matches one parameter name byte-exactly.
+	RemoveParamMatchExact
+	// RemoveParamMatchExactInverse is the negated exact form.
+	RemoveParamMatchExactInverse
+)
+
+// MatchKind reports the modifier's matching form.
+func (rm *RemoveParamModifier) MatchKind() RemoveParamMatchKind {
+	switch rm.kind {
+	case removeparamKindExact:
+		return RemoveParamMatchExact
+	case removeparamKindExactInverse:
+		return RemoveParamMatchExactInverse
+	case removeparamKindRegexp:
+		return RemoveParamMatchRegexp
+	case removeparamKindRegexpInverse:
+		return RemoveParamMatchRegexpInverse
+	default:
+		return RemoveParamMatchGeneric
+	}
+}
+
+// ExactParam returns the exact parameter name for RemoveParamMatchExact
+// modifiers.
+func (rm *RemoveParamModifier) ExactParam() string { return rm.param }
+
+// RemoveParamEligible reports whether req falls inside the $removeparam
+// method whitelist and carries a query (docs 2634). Extracted from
+// AcquireQueryState so the networkrules action index shares the single
+// eligibility fact (2026-10-08, B10).
+func RemoveParamEligible(req *http.Request) bool {
+	if req == nil || req.URL == nil || req.URL.RawQuery == "" {
+		return false
+	}
+	switch strings.ToUpper(req.Method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// Always eligible.
+	case http.MethodPost:
+		// Bodyless POST only (doc 2634 "sometimes POST").
+		if req.Body != nil && req.ContentLength != 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	return true
+}
+
 var _ QueryModifier = (*RemoveParamModifier)(nil)
 
 func (rm *RemoveParamModifier) Parse(modifier string) error {

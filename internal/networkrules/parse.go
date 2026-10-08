@@ -132,6 +132,15 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 	if r.FrameScoped {
 		nr.frameScopedRules.Add(1)
 	}
+	// 2026-10-08 (B10-A): empty-pattern rules whose effects are entirely
+	// $cookie/$removeparam route out of the generic bucket into the
+	// action index, so the hot paths evaluate only the applicable ones
+	// (actionindex.go). The route point sits after $badfilter collection
+	// and before Insert; mixed-action rules stay in the store unchanged.
+	if nr.actionIdxOn && pattern == "" && routeableMatchAllAction(r) {
+		nr.actionIdx.addRule(r)
+		return false, nil
+	}
 	if err := nr.primaryStore.Insert(pattern, r); err != nil {
 		return false, fmt.Errorf("insert rule: %w", err)
 	}
