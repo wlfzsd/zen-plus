@@ -85,6 +85,30 @@ func (n *node[T]) getEdge(label token) *node[T] {
 type traverser[T Data] struct {
 	data []T
 	n    *node[T]
+
+	// dedup (2026-10-08 P6): when non-nil, leaf values already collected in
+	// this traversal are skipped, so the accumulator holds each value exactly
+	// once, in first-occurrence order. GetLP sets it from a pooled map: a
+	// wildcard tail re-visits the same leaf at every URL position (see
+	// traverseWildcardTail), which previously appended one copy per position
+	// and let a 68 KB URL grow the accumulator to ~180 MB per store
+	// (leak_capture heap_2.txt node.go:112 / goroutine_2.txt). nil keeps the
+	// plain append semantics used by traverse()/Get.
+	dedup map[T]struct{}
+}
+
+// appendLeaf adds n's leaf values to the accumulator, honoring t.dedup.
+func (t *traverser[T]) appendLeaf() {
+	if t.dedup == nil {
+		t.data = append(t.data, t.n.leaf...)
+		return
+	}
+	for _, v := range t.n.leaf {
+		if _, ok := t.dedup[v]; !ok {
+			t.dedup[v] = struct{}{}
+			t.data = append(t.data, v)
+		}
+	}
 }
 
 func (n *node[T]) traverse(url string) []T {
@@ -109,7 +133,7 @@ func (t *traverser[T]) visit(n *node[T], url string) {
 func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 	if len(prefix) == 0 {
 		if t.n.isLeaf() {
-			t.data = append(t.data, t.n.leaf...)
+			t.appendLeaf()
 		}
 		if url == "" {
 			if anchor := t.n.getEdge(tokenAnchor); anchor != nil {
@@ -137,7 +161,7 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 	}
 	if len(url) == 0 {
 		if t.n.isLeaf() && len(prefix) == 1 && (prefix[0] == tokenAnchor || prefix[0] == tokenSeparator || prefix[0] == tokenWildcard) {
-			t.data = append(t.data, t.n.leaf...)
+			t.appendLeaf()
 		}
 		return
 	}

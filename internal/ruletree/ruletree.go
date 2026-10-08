@@ -128,14 +128,23 @@ func (n *node[T]) advancePrefix(k int) {
 
 // Get retrieves data matching the given URL.
 //
+// Results are deduplicated in deterministic first-occurrence order
+// (2026-10-08 P6): the traversal itself is ordered (sorted edges,
+// insertion-ordered leaves), so the only nondeterminism was the former
+// map-based dedup, whose map iteration order made the result sequence —
+// and with it the identity of the winning rule — vary between runs of the
+// same binary. The set of returned values is unchanged.
+//
 // The URL is expected to be a valid URL with scheme and host.
 func (t *Tree[T]) Get(url string) []T {
-	data := make(map[T]struct{})
+	seen := make(map[T]struct{})
+	result := make([]T, 0)
 
 	addUnique := func(items []T) {
 		for _, item := range items {
-			if _, exists := data[item]; !exists {
-				data[item] = struct{}{}
+			if _, exists := seen[item]; !exists {
+				seen[item] = struct{}{}
+				result = append(result, item)
 			}
 		}
 	}
@@ -171,18 +180,24 @@ func (t *Tree[T]) Get(url string) []T {
 		}
 	}
 
-	result := make([]T, len(data))
-	var i int
-	for d := range data {
-		result[i] = d
-		i++
-	}
 	return result
 }
 
-// GetLP is the low-allocation variant of Get (2026-10-06): identical result
-// SET (dedup makes order map-random in both), with
-//   - one shared accumulator for the whole traversal (node.visit), and
+// maxPooledAccEntries drops oversized pooled containers so a pathological
+// URL cannot make the pools hoard huge backings (defense in depth on top of
+// the in-traversal dedup; mirrors rulestore.maxPooledResEntries).
+const maxPooledAccEntries = 8192
+
+// GetLP is the low-allocation variant of Get (2026-10-06). Since P6
+// (2026-10-08) results are deduplicated in deterministic first-occurrence
+// order: identical value set, a stable identity sequence across runs of the
+// same binary, and identical sequences in Get and GetLP. It keeps
+//   - one shared accumulator for the whole traversal (node.visit), with the
+//     dedup applied DURING accumulation (traverser.dedup): a wildcard tail
+//     re-visits the same leaf at every URL position, which previously
+//     appended one copy per position and let a 68 KB URL grow the
+//     accumulator to ~180 MB per store (leak_capture heap_2.txt /
+//     goroutine_2.txt; CPU 3.9 cores + 2.1 GB resident), and
 //   - the accumulator and the dedup map served from per-tree sync.Pools.
 //
 // The returned slice is freshly allocated, exactly like Get. GetLP may run
@@ -197,7 +212,10 @@ func (t *Tree[T]) GetLP(url string) []T {
 	accp := t.accPool.Get().(*[]T)
 	acc := (*accp)[:0]
 
-	tr := traverser[T]{data: acc}
+	m := t.mapPool.Get().(map[T]struct{})
+	clear(m)
+
+	tr := traverser[T]{data: acc, dedup: m}
 	tr.visit(t.anchorRoot, url)
 	tr.visit(t.root, url)
 
@@ -231,20 +249,19 @@ func (t *Tree[T]) GetLP(url string) []T {
 
 	acc = tr.data
 
-	m := t.mapPool.Get().(map[T]struct{})
-	clear(m)
-	for _, item := range acc {
-		m[item] = struct{}{}
+	result := make([]T, len(acc))
+	copy(result, acc)
+
+	// Defense in depth (P6): never pool oversized containers. The
+	// in-traversal dedup already bounds acc by the number of distinct
+	// matched values; this keeps a pathological tree from pinning memory.
+	if cap(acc) <= maxPooledAccEntries {
+		*accp = acc[:0]
+		t.accPool.Put(accp)
 	}
-	result := make([]T, len(m))
-	var i int
-	for d := range m {
-		result[i] = d
-		i++
+	if len(m) <= maxPooledAccEntries {
+		t.mapPool.Put(m)
 	}
-	*accp = acc[:0]
-	t.accPool.Put(accp)
-	t.mapPool.Put(m)
 	return result
 }
 

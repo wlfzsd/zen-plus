@@ -35,8 +35,27 @@ func New() *NetworkRules {
 	}
 }
 
+// maxMatchURLLen (2026-10-08 P6): AdGuard truncates URLs to 4096 characters
+// before matching — docs "Basic rules → Basic rule syntax", pattern bullet:
+// "AdGuard truncates URLs to a length of 4096 characters in order to speed
+// up matching and avoid issues with ridiculously long URLs"
+// (adguard.com/kb/general/ad-filtering/create-own-filters/). Beyond
+// alignment with AdGuard, this bounds ruletree traversal input: a 68 KB URL
+// previously drove wildcard position-enumeration into minutes of CPU and a
+// ~180 MB accumulator per store (leak_capture heap_2.txt / goroutine_2.txt).
+func matchURL(u *url.URL) string {
+	s := renderURLWithoutPort(u)
+	if len(s) > maxMatchURLLen {
+		s = s[:maxMatchURLLen]
+	}
+	return s
+}
+
+// maxMatchURLLen is the matching-URL cap (AdGuard semantics, see matchURL).
+const maxMatchURLLen = 4096
+
 func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, shouldBlock bool, redirectURL string) {
-	reqURL := renderURLWithoutPort(req.URL)
+	reqURL := matchURL(req.URL)
 
 	// The user-navigation guard is a per-request property (upstream #257
 	// semantics); hoist the two header reads out of the per-rule evaluation.
@@ -111,7 +130,7 @@ outer:
 }
 
 func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule.Rule, error) {
-	url := renderURLWithoutPort(req.URL)
+	url := matchURL(req.URL)
 
 	primaryRules := nr.primaryStore.Get(url)
 	defer nr.primaryStore.putRes(primaryRules)
@@ -176,7 +195,7 @@ func (nr *NetworkRules) ActiveExceptions(req *http.Request) exemption.Exemption 
 		return exemption.Exemption{}
 	}
 
-	reqURL := renderURLWithoutPort(req.URL)
+	reqURL := matchURL(req.URL)
 	exceptions := nr.exceptionStore.Get(reqURL)
 	defer nr.exceptionStore.putRes(exceptions)
 
@@ -224,7 +243,7 @@ func refererRendered(referer string) string {
 
 	u, err := url.Parse(referer)
 	if err == nil && u.Hostname() != "" {
-		rendered = renderURLWithoutPort(u)
+		rendered = matchURL(u)
 	}
 	refererRenderCacheMu.Lock()
 	if len(refererRenderCache) >= refererRenderCacheLimit {
