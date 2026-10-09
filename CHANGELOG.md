@@ -1,17 +1,98 @@
 # Changelog
 
-## v0.25.1
+## v3.1.0
 
-### What's New
+### 中文
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+zen-plus v3.1.0（仍基于上游 **v0.25.1** 基线，非上游合并版本）：27 个提交，四块内容——AdGuard 规则语义兼容、响应路径判定修复、引擎性能与健壮性强化、上游代理配置全面升级。
 
-Thank you for using Zen!
+### 规则语义：更贴近 AdGuard 官方语义（B1-B8 兼容批次）
+- 例外语义重构：逐请求取消、`$document` 页面级豁免、`$generichide`/`$elemhide`/`$jsinject` 等页面级修饰符真实生效；popup/$cookie/$script:inject 别名与 `$badfilter`/`$removeparam`/`$replace`/`$csp`/`$permissions` 批量语法补齐
+- `$jsonprune` AdGuard 方言预处理（未加引号联合、`?(has/...)` 映射）+ 扩展路径（`[-]`/`{-}`/`\$..`/`[?()]`/`[=]`）+ 12 个 `trusted-*` 脚本注入键，激活一批此前解析失败或静默失效的规则（youtube/twitter/msn/pluto 等）
+- 每批语法变更均以 83 万行真实语料逐行归因对拍验证（0 未归因）
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+### 响应路径判定修复（一批此前恒不生效的规则复活）
+- `$xmlhttprequest`/`$xhr` 在响应路径改用 Fetch Metadata 判定：37 条存活规则（34 条 `$replace`）从此生效
+- `$domain` 条件此前在响应侧恒返回 false：180 条响应动作规则（$cookie 78、$replace 79、$jsonprune 13、$csp 9）从此生效
+- `$permissions` 按 AdGuard 语义仅作用于 frame 加载：修复 4255 次非 frame 响应被误加 Permissions-Policy 头（31 分钟捕获窗口内 100% 响应改写），并消除 +75µs/op 开销
+- `$document` 异常作用域修复：某列表一条 `@@$doc,removeparam=...` 曾使全站脚本注入/元素隐藏失效（YouTube 广告回归的机制根因），现已按动作/查询修饰符正确收窄
+
+### 引擎性能与健壮性
+- 超长/组合 URL 遍历爆炸修复：68KB 对抗 URL 从分钟级 CPU＋183MB 内存降至 ~1ms／~0.7MB；1017 字符 `??` 组合 URL 从 15s+ 降至 8.4ms（全状态记忆化＋尾通配吞并＋4096 字符截断对齐 AdGuard）
+- 同签名规则覆盖去重：默认列表裁剪 14,581 条被覆盖规则，live 堆 -3.3MB，33,303 URL 决策 0 差异
+- match-all `$cookie`/`$removeparam` 动作索引：ModifyReq 352 → 241µs/op
+- ModifyReq 热路径再提速 12.6%（180.3k → 157.6k ns/req，黄金对拍 133,324 决策 0 差异）
+- 每请求分配：语料回放 413 → 7 次；hostmatch 自 TLD 向下建树（上游 #810）：matcher 内存 38MB → 6.8MB，asset 引擎 retained heap 42MB → 9MB
+- 回滚开关：`ZEN_RULE_COVER_DEDUP=0`、`WithCoverageDedup(false)`、`WithActionIndex(false)` 均可恢复旧行为
+
+### 上游代理增强
+- 从 `upstream-proxy.txt` 文件迁移到应用内 设置 → 高级 配置（存 config.json，旧文件首次启动自动导入并改名 `.migrated`）
+- 新增 HTTPS 与 SOCKS5 上游类型，支持可选凭证（HTTP(S) Basic 认证 / SOCKS5 RFC 1929）
+- 目标主机名不在本地解析——DNS 留在上游；设置镜像到标准代理环境变量，过滤列表下载同样走链
+- `ZEN_UPSTREAM_PROXY` 环境变量覆盖保留
+
+### 出站协议重放（h2-mirror）
+- 出站协议跟随客户端：HTTP/2 客户端按线上捕获的 h2 指纹参数重放（SETTINGS 值与顺序、连接级 WINDOW_UPDATE、PRIORITY 帧、伪头与头部顺序），HTTP/1.1 客户端保持 HTTP/1.1
+- TLS 层仍为 ClientHello 结构镜像：出口 JA3 与直连逐字节一致的结论不变
+
+### 其他
+- 更新后重启重开窗口并恢复代理运行状态（上游 #799）
+- 诊断装置（决策 tap、响应体转储、`ZEN_PPROF`/`ZEN_FORCE_H1_OUT`/`ZEN_LEGACY_OUT`）全部环境变量门控、默认关闭，不影响默认行为
+
+### 诚实基线
+- 以上性能数字来自各提交落地时的实测基准（提交前对拍验证），本次发布未重新全量复测
+- 本版本**有意**让拦截行为更贴近 AdGuard 语义——v3.0.0 的"与上游逐请求一致"声明不再适用于本版本
+- 已知测试问题：`internal/ruletree` 的 `TestP6EngineLongURLBoundedCost` 在冷启动单独运行时内存测量超 1MB 上限（实测 ~1.48MB，对抗路径时延仍 ~1ms、与修复前 183MB 相差两个数量级）；不影响二进制行为，待后续单独排查
+
+### 安装
+下载 Zen.exe 覆盖 `%LOCALAPPDATA%\Programs\Zen\Zen.exe`（配置与过滤器缓存通用）。SHA256 见下方 Assets。
+
+---
+
+### English
+
+zen-plus v3.1.0 (still based on the upstream **v0.25.1** baseline — not an upstream merge): 27 commits in four areas — AdGuard rule-semantics compatibility, response-path condition fixes, engine performance and robustness, and a full upgrade of the upstream proxy configuration.
+
+### Rule semantics: closer to official AdGuard semantics (batches B1–B8)
+- Reworked exception semantics: per-request cancellation, `$document` page-scope exemptions, real enforcement of page-level modifiers (`$generichide`/`$elemhide`/`$jsinject`); popup/$cookie/$script:inject aliases plus `$badfilter`/`$removeparam`/`$replace`/`$csp`/`$permissions` syntax coverage
+- `$jsonprune` AdGuard-dialect preprocessing (unquoted unions, `?(has/...)` mapping) + extended paths (`[-]`/`{-}`/`\$..`/`[?()]`/`[=]`) + 12 `trusted-*` scriptlet keys — activates rules that previously failed to parse or were silently inert (youtube/twitter/msn/pluto and others)
+- Every syntax batch was verified with per-line attribution over an 833k-line real-corpus diff gate (0 unattributed)
+
+### Response-path condition fixes (a class of dead rules revived)
+- `$xmlhttprequest`/`$xhr` now use Fetch Metadata on the response path: 37 live rules (34 of them `$replace`) work again
+- `$domain` unconditionally returned false on the response path: 180 response-action rules (cookie 78, replace 79, jsonprune 13, csp 9) work again
+- `$permissions` now applies to frame loads only, per AdGuard docs: fixes 4,255 non-frame responses getting the Permissions-Policy header (100% of response rewrites in a 31-minute capture) and removes a +75µs/op overhead
+- `$document` exception scoping fixed: one list's `@@$doc,removeparam=...` used to disable scriptlet/cosmetic injection site-wide (the mechanism behind the YouTube ad regression); exemptions are now correctly narrowed by action/query modifiers
+
+### Engine performance and robustness
+- Traversal-explosion fix for very long / combinatorial URLs: a 68KB adversarial URL went from minutes of CPU and 183MB to ~1ms / ~0.7MB; a 1017-char `??` combo URL from 15s+ to 8.4ms (full-state memoization + tail-subsumption + 4096-char truncation per AdGuard)
+- Same-signature coverage dedup: 14,581 covered rules pruned on the default lists, 3.3MB live heap, zero decision diffs over 33,303 URLs
+- Match-all `$cookie`/`$removeparam` action index: ModifyReq 352 → 241µs/op
+- ModifyReq hot path another 12.6% faster (180.3k → 157.6k ns/req, golden master 133,324 decisions, 0 diffs)
+- Per-request allocations: corpus replay 413 → 7; hostmatch trie keyed from the TLD down (upstream #810): matcher memory 38MB → 6.8MB, asset-engine retained heap 42MB → 9MB
+- Rollback switches: `ZEN_RULE_COVER_DEDUP=0`, `WithCoverageDedup(false)`, `WithActionIndex(false)` restore the previous behavior
+
+### Upstream proxy enhancements
+- Moved from the `upstream-proxy.txt` file into the app (Settings → Advanced; stored in config.json, the legacy file is imported once on first start and renamed `.migrated`)
+- New HTTPS and SOCKS5 upstream types with optional credentials (HTTP(S) Basic / SOCKS5 RFC 1929)
+- Target hostnames stay unresolved locally — DNS happens at the upstream; the setting is mirrored into the standard proxy environment variables so filter-list downloads chain too
+- The `ZEN_UPSTREAM_PROXY` environment variable override is preserved
+
+### Outbound protocol replay (h2-mirror)
+- The outbound protocol follows the client: an HTTP/2 client is re-originated over HTTP/2 from the fingerprint parameters captured on the wire (SETTINGS values and order, connection-level WINDOW_UPDATE, PRIORITY frames, pseudo-header and header order); an HTTP/1.1 client stays on HTTP/1.1
+- The TLS layer remains the ClientHello structural mirror: JA3 through Zen stays byte-for-byte identical to a direct connection
+
+### Other
+- Updating now reopens the window and restores the proxy state after restart (upstream #799)
+- Diagnostic tooling (decision tap, body dumps, `ZEN_PPROF`/`ZEN_FORCE_H1_OUT`/`ZEN_LEGACY_OUT`) is env-gated and default-off; no behavior change when disabled
+
+### Honest baseline
+- The performance numbers above come from the benchmarks measured when each commit landed (replay-verified before commit); this release did not re-run the full measurement suite
+- This release **intentionally** moves blocking behavior closer to AdGuard semantics — v3.0.0's "request-by-request identical to upstream" statement no longer applies to this version
+- Known test issue: `TestP6EngineLongURLBoundedCost` in `internal/ruletree` measures ~1.48MB/op on a cold single run against its 1MB guard (the adversarial path itself stays at ~1ms, two orders of magnitude away from the 183MB pre-fix state); binary behavior is unaffected, root cause to be investigated separately
+
+### Install
+Replace `%LOCALAPPDATA%\Programs\Zen\Zen.exe` (configuration and filter caches are shared). SHA256 under Assets.
 
 ## v0.25.0
 
