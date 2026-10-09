@@ -23,8 +23,12 @@ import { ThemeSelector } from './ThemeSelector';
 import { UninstallCADialog } from './UninstallCADialog';
 import { UpstreamProxyInput } from './UpstreamProxyInput';
 
-const GITHUB_URL = 'https://github.com/irbis-sh/zen-desktop';
-const CHANGELOG_URL = `${GITHUB_URL}/blob/master/CHANGELOG.md`;
+// zen-plus fork (2026-10-09): point the About-panel links at the zen-plus
+// repo and its releases. Self-updates are disabled in zen-plus builds
+// (NoSelfUpdate=true), so these links are the in-app entry to new versions
+// and the changelog.
+const GITHUB_URL = 'https://github.com/wlfzsd/zen-plus';
+const CHANGELOG_URL = `${GITHUB_URL}/releases`;
 
 export function SettingsManager() {
   const { t } = useTranslation();
