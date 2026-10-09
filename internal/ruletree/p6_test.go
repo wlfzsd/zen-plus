@@ -319,7 +319,14 @@ var (
 // 跳过规则同 ytprobe3（空行/!/[），仅列表载入序固定。
 func p6YTLoader(t *testing.T) (*networkrules.NetworkRules, error) {
 	p6YTOnce.Do(func() {
-		dir := `C:\Users\Administrator\AppData\Local\Zen\filters`
+		// [2026-10-09] 真实语料目录环境变量化（对齐 tmp_enginebench bench_test.go
+		// 与 parse_getwatch_probe_test.go 的 ZEN_FILTER_DIR 惯例）：未设置时置错，
+		// 由调用方 t.Skipf 跳过，不再硬编码本机绝对路径。
+		dir := os.Getenv("ZEN_FILTER_DIR")
+		if dir == "" {
+			p6YTErr = fmt.Errorf("ZEN_FILTER_DIR not set (point it at the Zen filter cache to enable the youtube golden tests)")
+			return
+		}
 		nr := networkrules.New()
 		eng, err := asset.NewEngine("assets.zen.local")
 		if err != nil {
