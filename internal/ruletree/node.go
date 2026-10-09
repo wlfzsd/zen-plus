@@ -71,7 +71,27 @@ func (n *node[T]) updateEdge(label token, node *node[T]) {
 	}
 }
 
+// edgeLinearScanMax (2026-10-09 落地建议（eff_probe 沙箱原型验证：黄金对拍 0 差异＋5 轮 A/B）)：扇出不超过该值的节点用线性
+// 扫描替代 sort.Search 的闭包二分——CPU 画像显示 sort.Search+闭包占
+// ModifyReq 8.3%（getEdge 63.9%/36.1% 分属 primary/exception 树），而树内
+// 深层节点扇出普遍很小。语义严格等价：edges 按 label 升序（addEdge 维护），
+// 线性扫描命中首个 label==label 或越过即 nil，与 sort.Search 找首个
+// label>=label 再判等完全一致。
+const edgeLinearScanMax = 24
+
 func (n *node[T]) getEdge(label token) *node[T] {
+	if len(n.edges) <= edgeLinearScanMax {
+		for i := range n.edges {
+			l := n.edges[i].label
+			if l == label {
+				return n.edges[i].node
+			}
+			if l > label {
+				return nil
+			}
+		}
+		return nil
+	}
 	idx := sort.Search(len(n.edges), func(i int) bool {
 		return n.edges[i].label >= label
 	})
@@ -225,6 +245,20 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 			return
 		}
 		t.visited[k] = struct{}{}
+	}
+	// 2026-10-09 落地建议（eff_probe 沙箱原型验证）：连续字面量字节 token 改为循环内联消费。
+	// 与原 default 分支逐步递归（prefix[0]==token(url[0]) → 递归
+	// (prefix[1:], url[1:])）逐步等价：每轮做同一次比较并同步推进；
+	// 碰到特殊 token（>= tokenWildcard）或失配即停，剩余状态交给下方
+	// 原有分支。差异仅在于中间递归状态不再登记进 visited memo——少跳过
+	// 重复状态只会多做工作（重复走的 leaf 插入全部命中 dedup，累加器
+	// 首次出现序不变），不会改变任何输出；预算阀门（budgetOut）语义不变。
+	for len(prefix) > 0 && len(url) > 0 && prefix[0] < tokenWildcard {
+		if prefix[0] != token(url[0]) {
+			return
+		}
+		prefix = prefix[1:]
+		url = url[1:]
 	}
 	if len(prefix) == 0 {
 		if t.n.isLeaf() {

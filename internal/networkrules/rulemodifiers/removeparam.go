@@ -26,6 +26,13 @@ type RemoveParamModifier struct {
 	// patterns per exception×rule pair, and String() rebuilds the
 	// expression on every call.
 	pattern string
+	// litPrefix（2026-10-09 落地建议（eff_probe 沙箱原型验证：黄金对拍 0 差异＋5 轮 A/B））：编译后正则的 stdlib
+	// LiteralPrefix。非空时任意匹配串必然以它开头（未锚定匹配的匹配子串
+	// 也以模式字面前缀开始），故请求查询串不可能包含它时整条 modifier 可
+	// 直接跳过——零假阴性。CPU 画像：RemoveParamModifier.ModifyQuery 占
+	// ModifyReq 9.3%，其中 regexp.MatchString 4.41s/3轮（21.2% 的
+	// MatchString 调用来自这里）。
+	litPrefix string
 }
 
 // RemoveParamMatchKind classifies a $removeparam modifier's matching form
@@ -120,6 +127,11 @@ func (rm *RemoveParamModifier) Parse(modifier string) error {
 		}
 		rm.regexp = regexp
 		rm.pattern = regexp.String()
+		// stdlib 保守提取必需字面前缀（LiteralPrefix 处理 '^' 锚与
+		// 字面开头；'.*' 开头等返回空串则不启用预筛）。
+		if pfx, _ := regexp.LiteralPrefix(); pfx != "" {
+			rm.litPrefix = pfx
+		}
 		return nil
 	}
 
@@ -173,6 +185,25 @@ func (rm *RemoveParamModifier) Parse(modifier string) error {
 func (rm *RemoveParamModifier) ModifyQuery(req *http.Request, qs *QueryState) bool {
 	if qs == nil || qs.Empty() {
 		return false
+	}
+
+	// 预筛（2026-10-09 落地建议，eff_probe 沙箱原型验证）：litPrefix 非空的正则种类规则，当
+	// 原始查询串不可能包含必需前缀时直接返回 false。等价性论证：
+	//   - matchText 只能是 seg（有"="，seg ⊆ RawQuery）或 seg+"="（无值对）；
+	//   - 前者：litPrefix ⊆ matchText ⇒ litPrefix ⊆ RawQuery；
+	//   - 后者：litPrefix 跨到补写的"="时必然以"="结尾且其去掉末字符的
+	//     前缀 ⊆ seg ⊆ RawQuery（"="只补在尾部）；
+	//   - qs 的段只会被删除（SetSegments/SetEmpty），不改写、不新增，且
+	//     Finalize 之前 req.URL.RawQuery 保持原始值（B7 语义），故以原始
+	//     RawQuery 判定对后续规则同样安全；
+	//   - 两个条件都不成立才可能匹配，跳过与逐段扫描输出相同（全段
+	//     drop=false ⇒ 返回 false）。
+	if rm.litPrefix != "" {
+		raw := req.URL.RawQuery
+		if !strings.Contains(raw, rm.litPrefix) &&
+			!(strings.HasSuffix(rm.litPrefix, "=") && strings.Contains(raw, rm.litPrefix[:len(rm.litPrefix)-1])) {
+			return false
+		}
 	}
 
 	if rm.kind == removeparamKindGeneric {
