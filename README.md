@@ -27,8 +27,10 @@
 ### 相比上游的修复与增强 / Fixes & enhancements beyond upstream
 
 - **修复：过滤开关反复切换导致内存大幅增长**（上游 bug）。上游在禁用/启用规则拦截时，内层连接服务器、退休的证书生成器与双向隧道不被回收，内存逐次翻倍；zen-plus 在 Stop 路径全部收割（提交 `81efce0`、`fb7e6a7`），并为传输空闲池设上限、空闲内存定期归还 OS。
-- **新增：上游代理链**（当前支持 HTTP 上游）。`upstream-proxy.txt` 一行配置即可让全部代理流量再经上游转发，用于叠加自有网络出口；镜像架构：拨号失败按新规格重拨镜像重试，**无任何静默降级路径**。
-- **新增：TLS 指纹镜像**（`internal/proxy/uptls.go`）。MITM 后重新出站的 TLS 连接**原样转发浏览器自己的 ClientHello**（uTLS `RawClientHello`）：Chrome 出去就是 Chrome 指纹、Firefox 就是 Firefox——不指定、不伪造任何档案。实测同一请求经 Zen 与直连**出口 JA3 逐字节一致**，规避"代理 TLS 指纹错配"类网站封控。已知边界：出站统一 HTTP/1.1、后量子密钥交换组被裁、HTTP header 顺序未做原始重放（详见使用文档）。
+- **新增：上游代理链**（支持 HTTP / HTTPS / SOCKS5 上游，可带凭证）。在应用内 设置 → 高级 中直接配置（存入 config.json，旧 `upstream-proxy.txt` 首次启动自动迁移），全部代理流量再经上游转发，用于叠加自有网络出口；目标主机名不在本地解析——DNS 留在上游，设置还会镜像到标准代理环境变量，过滤列表下载同样走链。镜像架构：拨号失败按新规格重拨镜像重试，**无任何静默降级路径**。
+- **新增：TLS 指纹镜像与出站协议重放**（`internal/proxy/uptls.go`、`internal/proxy/reoriginate.go`）。MITM 后重新出站的 TLS 连接镜像浏览器自己的 ClientHello 结构指纹（uTLS）：Chrome 出去就是 Chrome 指纹、Firefox 就是 Firefox——不指定、不伪造任何档案。实测同一请求经 Zen 与直连**出口 JA3 逐字节一致**，规避"代理 TLS 指纹错配"类网站封控。v3.1.0 起出站协议跟随客户端：HTTP/2 客户端按捕获的 h2 指纹参数（SETTINGS 值与顺序、连接级 WINDOW_UPDATE、PRIORITY 帧、伪头与头部顺序）在 HTTP/2 上重放，HTTP/1.1 客户端保持 HTTP/1.1。已知边界：ALPS/ECH 扩展剔除、后量子混合密钥交换组被裁（Go 无法生成对应 key share）、h2 重放不含 PRIORITY_UPDATE 且不控制 HPACK 索引表示（详见源码头注）。
+- **增强：AdGuard 规则语义兼容**（B1-B8 兼容批次）。例外语义重构（逐请求取消、页面级豁免）、popup/$cookie/$script:inject 别名与批量语法补齐；`$jsonprune` 方言预处理与 trusted-* 脚本注入键扩充，激活一批此前解析失败或静默失效的规则；修复响应路径判定（`$xmlhttprequest`/`$domain` 条件此前在响应侧恒不命中、`$permissions` 曾误加到全部响应、`$document` 异常作用域曾导致脚本注入全站失效）。
+- **增强：引擎性能与健壮性**。超长/组合 URL 遍历爆炸修复（68KB URL 从分钟级/183MB 内存降至毫秒级）、同签名规则覆盖去重（默认列表裁剪约 1.46 万条、live 堆 -3.3MB、决策 0 差异）、match-all `$cookie`/`$removeparam` 动作索引与 ModifyReq 热路径提速；每项变更均附与改前引擎的逐请求对拍证据。
 
 ### 实测效果 / Measured results（真实订阅语料 61.1 万条规则，多轮中位数）
 
@@ -48,8 +50,8 @@
 
 ### 版本策略 / Versioning
 
-zen-plus 使用自己的版本线（当前 **3.0.0**，起点基于上游 v0.25.1）；每次合并上游后递增 3.x，对应的上游基线写进 Release 说明。exe 内的版本号由构建时的 git tag 自动注入。
-zen-plus keeps its own version line (currently **3.0.0**, starting point based on upstream v0.25.1); each upstream merge bumps 3.x, and the upstream base is stated in every release's notes. The binary version string is injected from the git tag at build time.
+zen-plus 使用自己的版本线（当前 **3.1.0**，起点为上游 v0.25.1 基线）；每个版本对应的上游基线写进 Release 说明。exe 内的版本号由构建时的 git tag 自动注入。
+zen-plus keeps its own version line (currently **3.1.0**, starting from the upstream v0.25.1 baseline); the upstream base of every release is stated in its release notes. The binary version string is injected from the git tag at build time.
 
 ### 本地构建 / Build from source
 
@@ -90,8 +92,10 @@ Both rounds are hard-constrained by **zero semantic change** — every step was 
 ### Fixes & enhancements beyond upstream
 
 - **Fixed: large memory growth when toggling ad-blocking on/off** (upstream bug). Upstream leaks per-connection servers, retired certificate generators and bidirectional tunnels across filter toggles; zen-plus reaps all of them on Stop (commits `81efce0`, `fb7e6a7`), caps transport idle pools and returns idle memory to the OS periodically.
-- **Added: upstream proxy chain** (HTTP upstreams for now). A single line in `upstream-proxy.txt` routes all proxied traffic through an upstream of your choice; mirror architecture retries dialing with a fresh spec — **no silent fallback path**.
-- **Added: TLS fingerprint mirroring** (`internal/proxy/uptls.go`). Re-emitted TLS connections after MITM forward the browser's **own ClientHello byte-for-byte** (uTLS `RawClientHello`): Chrome goes out as Chrome, Firefox as Firefox — no profile is invented or selected. Verified: JA3 through Zen is **identical, byte-for-byte, to a direct connection**, defusing the "proxy TLS fingerprint mismatch" class of site blocks. Known limits: HTTP/1.1 egress, post-quantum key-share groups dropped, HTTP header order not replayed.
+- **Added: upstream proxy chain** (HTTP, HTTPS and SOCKS5 upstreams, optional credentials). Configure it in the app under Settings → Advanced (stored in config.json; a legacy `upstream-proxy.txt` is imported once on first start) to route all proxied traffic through an upstream of your choice; target hostnames are left unresolved locally — DNS stays at the upstream — and the setting is mirrored into the standard proxy environment variables so filter-list downloads chain too. Mirror architecture retries dialing with a fresh spec — **no silent fallback path**.
+- **Added: TLS fingerprint mirroring and outbound protocol replay** (`internal/proxy/uptls.go`, `internal/proxy/reoriginate.go`). Re-emitted TLS connections after MITM mirror the browser's **own ClientHello structural fingerprint** (uTLS): Chrome goes out as Chrome, Firefox as Firefox — no profile is invented or selected. Verified: JA3 through Zen is **identical, byte-for-byte, to a direct connection**, defusing the "proxy TLS fingerprint mismatch" class of site blocks. Since v3.1.0 the outbound protocol follows the client: an HTTP/2 client is re-originated over HTTP/2 from the captured h2 fingerprint parameters (SETTINGS values and order, connection-level WINDOW_UPDATE, PRIORITY frames, pseudo-header and header order); an HTTP/1.1 client stays on HTTP/1.1. Known limits: ALPS/ECH extensions dropped, post-quantum key-share groups dropped (Go cannot generate the corresponding shares), h2 replay emits no PRIORITY_UPDATE and no HPACK index-representation control (see the source-file header notes).
+- **Enhanced: AdGuard rule-semantics compatibility** (batches B1–B8). Reworked exception semantics (per-request cancellation, page-scope exemptions), popup/$cookie/$script:inject aliases and broad syntax coverage; `$jsonprune` dialect preprocessing plus trusted-* scriptlet keys activate rules that previously failed to parse or were silently inert; fixed response-path conditions (`$xmlhttprequest`/`$domain` never matched there, `$permissions` was applied to every response, `$document` exception scoping silently disabled scriptlet injection site-wide).
+- **Enhanced: engine performance and robustness**. Traversal-explosion fix for very long / combinatorial URLs (a 68KB URL went from minutes and 183MB to milliseconds), same-signature coverage dedup (~14.6k rules pruned on the default lists, 3.3MB live heap, zero decision diffs), a match-all `$cookie`/`$removeparam` action index and a faster ModifyReq hot path; every change ships with request-by-request replay evidence against the previous engine.
 
 ### Measured results (real-subscription corpus, 611,652 rules, medians)
 
