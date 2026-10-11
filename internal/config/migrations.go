@@ -399,6 +399,50 @@ var migrations = []migration{
 		log.Printf("v0.25.0 migration: moved autostart entry to the autostart directory")
 		return nil
 	}},
+	{"v0.26.1", func(c *Config) error {
+		// Configs written before v0.26.0 have no keyStorage; their CA is on disk. This migration
+		// shipped after v0.26.0, so a config may already say "hardware" and must keep it.
+		return c.update(func() error {
+			if c.Certmanager.KeyStorage == "" {
+				c.Certmanager.KeyStorage = KeyStorageDisk
+			}
+			return nil
+		})
+	}},
+	{"v0.27.0", func(c *Config) error {
+		// Move the AdGuard lists from their unbuilt sources to AdGuard's builds
+		// for its Windows app. The unbuilt lists mark platform-specific rules
+		// with !+ PLATFORM hints, which only AdGuard's compiler applies. The
+		// desktop build is the one Zen grows into as it gains the desktop apps'
+		// features, such as $replace and HTML filtering.
+		newURLs := map[string]string{
+			"https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt":    "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/platforms/windows/filters/2.txt",
+			"https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_3_Spyware/filter.txt": "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/platforms/windows/filters/3.txt",
+		}
+
+		return c.update(func() error {
+			present := make(map[string]bool, len(c.Filter.FilterLists))
+			for _, fl := range c.Filter.FilterLists {
+				present[fl.URL] = true
+			}
+			filtered := c.Filter.FilterLists[:0]
+			for _, fl := range c.Filter.FilterLists {
+				if newURL, ok := newURLs[fl.URL]; ok {
+					if present[newURL] {
+						// The user already has the build; a rewrite would list it twice.
+						log.Printf("v0.27.0 migration: removed %q, already have %q", fl.URL, newURL)
+						continue
+					}
+					log.Printf("v0.27.0 migration: replaced %q with %q", fl.URL, newURL)
+					fl.URL = newURL
+					present[newURL] = true
+				}
+				filtered = append(filtered, fl)
+			}
+			c.Filter.FilterLists = filtered
+			return nil
+		})
+	}},
 }
 
 // RunMigrations runs the version-to-version migrations in order.
