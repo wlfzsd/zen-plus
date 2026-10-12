@@ -4,18 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/irbis-sh/zen-desktop/internal/exemption"
 	"github.com/irbis-sh/zen-desktop/internal/hostmatch"
 	"github.com/irbis-sh/zen-desktop/internal/redacted"
-)
-
-var (
-	primaryRuleRegex   = regexp.MustCompile(`(.*?)##(.*)`)
-	exceptionRuleRegex = regexp.MustCompile(`(.*?)#@#(.+)`)
 )
 
 type store interface {

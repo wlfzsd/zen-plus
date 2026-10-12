@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -17,9 +16,6 @@ import (
 )
 
 var (
-	primaryRuleRegex   = regexp.MustCompile(`(.+?)#\??#(.+)`)
-	exceptionRuleRegex = regexp.MustCompile(`(.+?)#@\??#(.+)`)
-
 	//go:embed bundle.js
 	defaultExtendedCSSBundle []byte
 )
