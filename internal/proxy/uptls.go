@@ -273,7 +273,10 @@ func alignSpecALPN(spec *utls.ClientHelloSpec, inboundH2 bool) {
 
 // dialUpstreamMimicTLS dials addr through the upstream-chain tunnel (or the
 // plain dialer without a chain) and completes the TLS handshake with the
-// client's mirrored ClientHello. There is deliberately no downgrade path to
+// client's mirrored ClientHello. This dial chain serves the h1 mirror leg
+// only (reoriginate.go h1t.DialTLSContext): the spec it parses is aligned to
+// http/1.1 - see freshSpecFrom for the 2026-10-13 incident this pins. There
+// is deliberately no downgrade path to
 // stock Go TLS: a handshake that cannot be carried by the mirror must fail
 // loudly (per-connection 502, visible in the log) instead of silently
 // surfacing the Go fingerprint to the origin. After the root-cause fixes
@@ -357,16 +360,27 @@ func hostOf(addr string) string {
 // required because ApplyPreset fills key-share public keys into the spec it
 // is given; a second dial on a mutated spec would skip key generation and
 // fail with an internal error. Returns nil when no hello was captured.
+//
+// [2026-10-13 根因修复] ALPN 对齐跟随"说话的腿"，不跟随入站客户端。本拨号链
+// （h1t.DialTLSContext → dialUpstreamMimicTLS → dialMirrorOnce → 本函数）只
+// 服务 h1 镜像腿，出站必然讲 HTTP/1.1，因此无条件按 h1 对齐（从 ALPN 供给中
+// 剔除 h2）。此前这里读 connFacts.inboundH2：h2 入站浏览器（一切现代浏览器
+// 对 MITM 隧道都讲 h2）令出站 hello 原样供给 [h2, http/1.1]，对端按 ALPN
+// 协商出 h2 后收到的却是 h1 请求，回 h2 SETTINGS 帧 → fhttp h1 腿报
+// "malformed HTTP response" → 502。被 markH1Only 的主机（视频 CDN 边缘节点
+// 对镜像 hello 的协商结果随边缘而变）每次新拨号重掷骰子：上游不稳期连接池
+// 高频重建把偶发 502 连成风暴，只有重启 Zen（清空标记+连接池）才恢复。
+// 实证：application.log 180 条 malformed 错误聚簇于 2026/10/11-12 上游不稳
+// 窗口，且回归测试 TestH1LegFreshDialALPNAlignedToH1 逐字节复现该错误。
+// ALPN 回退 handoff 路径（reoriginate.go roundTripH2 → extractMimicSpec
+// (helloRaw, false)）自始就是本语义，本修复使全部 h1 腿新拨号与之对齐。
+// h2 腿不受影响：它经 dialWithHello 直接用 extractMimicSpec(raw, true)。
 func (p *Proxy) freshSpecFrom(ctx context.Context) *utls.ClientHelloSpec {
 	raw, ok := ctx.Value(mimicHelloKey{}).([]byte)
 	if !ok || len(raw) == 0 {
 		return nil
 	}
-	inboundH2 := false
-	if facts := connFactsFromContext(ctx); facts != nil {
-		inboundH2 = facts.inboundH2
-	}
-	return extractMimicSpec(raw, inboundH2)
+	return extractMimicSpec(raw, false)
 }
 
 // newMimicContext attaches the raw captured hello and the connection's

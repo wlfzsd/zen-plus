@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	fhttp2 "github.com/bogdanfinn/fhttp/http2"
@@ -52,6 +53,28 @@ type mimicRoundTripper struct {
 	h1Only map[string]bool              // targets whose wire path cannot honor h2
 	h1t    *fhttp.Transport             // shared h1-only transport
 }
+
+// chainedH2ReadIdleTimeout / chainedH2PingTimeout arm fhttp2's built-in ping
+// health check on the h2 mirror leg ([2026-10-13 根因修复]). With
+// ReadIdleTimeout=0 the library performs no health check at all (fhttp2
+// transport.go: readLoop arms the timer only when the field is non-zero).
+// Every stream to a target is multiplexed onto one h2 connection that rides
+// one chained upstream tunnel; an unstable upstream black-holes that tunnel
+// without a RST, and the wedged connection keeps canTakeNewRequest=true
+// (client_conn_pool.go reuse does no liveness probing), so every new request
+// to that host joins the graveyard and waits forever - recoverable only by
+// restarting Zen. With the check armed: no frames for ReadIdleTimeout →
+// PING; no PONG within PingTimeout → the connection is closed and marked
+// dead, parked streams error out, and the next request dials a fresh
+// connection and self-heals. PingTimeout is sized to absorb multi-second
+// upstream RTT spikes (pong wait ≈ 10× a healthy chain RTT), and a healthy
+// but flow-controlled connection still answers PING, so stalled video
+// buffering is not a false kill. The h1 mirror leg needs no counterpart: it
+// has ResponseHeaderTimeout plus the transport's stale-conn retry.
+const (
+	chainedH2ReadIdleTimeout = 20 * time.Second
+	chainedH2PingTimeout     = 20 * time.Second
+)
 
 func newMimicRoundTripper(p *Proxy, stockTLSCfg func() *tls.Config) *mimicRoundTripper {
 	m := &mimicRoundTripper{
@@ -229,6 +252,8 @@ func (m *mimicRoundTripper) h2TransportFor(addr string, facts *connFacts) *fhttp
 			return conn, nil
 		},
 		IdleConnTimeout: chainedIdleConnTimeout,
+		ReadIdleTimeout: chainedH2ReadIdleTimeout,
+		PingTimeout:     chainedH2PingTimeout,
 		PushHandler:     &fhttp2.DefaultPushHandler{},
 	}
 	t2.Settings, t2.SettingsOrder = settingsFromFacts(facts)
