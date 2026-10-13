@@ -81,6 +81,9 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 			if err := r.ParseModifiers(modifiers); err != nil {
 				return false, fmt.Errorf("parse modifiers: %v", err)
 			}
+			// 修饰符共享（2026-10-13 batch 3, modshare.go）：同文本例外
+			// 规则共享解析块（嵌入的 rule.Rule 走同一钩子）。
+			nr.shareMods(&r.Rule, modifiers)
 		}
 		// $badfilter exception rules are collected instead of inserted
 		// (2026-10-08 B6); they disable exception rules by exact text
@@ -140,6 +143,9 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 		if err := r.ParseModifiers(modifiers); err != nil {
 			return false, fmt.Errorf("parse modifiers: %v", err)
 		}
+		// 修饰符共享（2026-10-13 batch 3, modshare.go）：同文本规则共享
+		// 解析块，砍掉每规则一份的重复对象（官方 #821，适配本分支结构）。
+		nr.shareMods(r, modifiers)
 	}
 	// $badfilter rules are collected instead of inserted (2026-10-08 B6):
 	// they never block by themselves and are applied once, post-load, in

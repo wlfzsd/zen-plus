@@ -57,6 +57,11 @@ type NetworkRules struct {
 	frozen  atomic.Bool
 	liveExc liveExceptionStore
 
+	// modsInterner shares parsed modifier blocks between rules with the
+	// same modifier text (modshare.go, 2026-10-13 batch 3, borrowed from
+	// upstream #821). Nil map after Compact: live rules stay unshared.
+	modsInterner *modsInterner
+
 	// 覆盖去重（2026-10-09，coveragededup.go）：装载期登记候选，Compact
 	// 在 applyBadfilters 之后一次性解析覆盖链并物理剪枝。covArmed 在
 	// Compact 后解除武装——白名单服务器等活插入永不参与。covOn 是
@@ -96,6 +101,7 @@ func New(opts ...NetworkRulesOption) *NetworkRules {
 		covOn:          true,
 	}
 	nr.liveExc.store = newRuleStore[*exceptionrule.ExceptionRule]()
+	nr.modsInterner = newModsInterner()
 	nr.covArmed.Store(true)
 	for _, opt := range opts {
 		opt(nr)
@@ -470,6 +476,9 @@ func (nr *NetworkRules) pageExceptions(req *http.Request, scope func(*exceptionr
 }
 
 func (nr *NetworkRules) Compact() {
+	// 修饰符共享池在 Compact 时丢弃（官方 #821 语义）：活插入规则不再
+	// 共享、不 pin 映射；已共享规则通过自身指针继续持有 canonical 块。
+	nr.dropModsInterner()
 	// $badfilter disablement must run after every filter list was loaded
 	// and before the stores are used for matching (2026-10-08 B6).
 	nr.applyBadfilters()

@@ -75,6 +75,19 @@ type Rule struct {
 	noConds bool
 }
 
+// ShareModsFrom adopts the parsed modifier groups of canon, a rule parsed
+// from identical modifier text (networkrules modsInterner, 2026-10-13
+// batch 3, borrowed from upstream #821). ParseModifiers is deterministic
+// in the modifier text, and the groups are immutable once ParseModifiers
+// returns — every mutation site (the ensure* appends at :337/:344/:353 and
+// the MatchTargetDomain link at :366-372) lives inside ParseModifiers — so
+// aliasing the canonical groups is behavior-neutral and lets same-text
+// rules share one block instead of holding duplicates.
+func (rm *Rule) ShareModsFrom(canon *Rule) {
+	rm.condMods = canon.condMods
+	rm.actMods = canon.actMods
+}
+
 // BadfilterDisable describes how $badfilter rules disabled a rule after the
 // filter lists were fully loaded (networkrules.Compact, 2026-10-08 B6).
 type BadfilterDisable struct {
