@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
@@ -51,10 +52,13 @@ type indexedRule struct {
 }
 
 // matchAllActionIndex holds the routed empty-pattern $cookie/$removeparam
-// rules. Writes happen only during loading (ParseRule, single-threaded);
-// reads happen after Compact during serving, unlocked — the same
-// "write at load, read at serve" shape as frameScopedRules.
+// rules. addRule writes are serialized by mu: list loading runs on parallel
+// goroutines (internal/app/filter.go populateFilter) despite this struct's
+// original single-threaded assumption. Reads happen after Compact during
+// serving, unlocked — the same "write at load, read at serve" shape as
+// frameScopedRules.
 type matchAllActionIndex struct {
+	mu          sync.Mutex
 	total       int
 	nextSeq     uint32
 	cookieExact map[string][]indexedRule // $cookie=NAME (byte-exact key)
@@ -75,6 +79,9 @@ func (idx *matchAllActionIndex) hasCookieRules() bool {
 // actions are all *CookieModifier and/or its queries all
 // *RemoveParamModifier.
 func (idx *matchAllActionIndex) addRule(r *rule.Rule) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
 	seq := idx.nextSeq
 	idx.nextSeq++
 

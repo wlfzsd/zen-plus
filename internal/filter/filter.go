@@ -310,6 +310,8 @@ func (f *Filter) AddURL(ctx context.Context, listURL string, listName string, li
 // AddReader parses the rules from the given reader and adds them to the filter.
 func (f *Filter) AddReader(listRules io.Reader, listName string, listTrusted bool) error {
 	var ruleCount, exceptionCount int
+	var failureCount int
+	var firstFailures []string
 	scanner := bufio.NewScanner(listRules)
 	scanner.Buffer(nil, maxRuleLength)
 
@@ -320,7 +322,12 @@ func (f *Filter) AddReader(listRules io.Reader, listName string, listTrusted boo
 		}
 
 		if isException, err := f.addRule(line, &listName, listTrusted); err != nil { // nolint:revive
-			// log.Printf("error adding rule: %v", err)
+			// myRules 路径可观测性（2026-10-13）：此前解析失败被完全静默，
+			// 用户自定义规则写错时无任何痕迹。记录计数与首几条样例。
+			failureCount++
+			if len(firstFailures) < 5 {
+				firstFailures = append(firstFailures, line)
+			}
 		} else if isException {
 			exceptionCount++
 		} else {
@@ -331,6 +338,10 @@ func (f *Filter) AddReader(listRules io.Reader, listName string, listTrusted boo
 		return err
 	}
 
+	if failureCount > 0 {
+		log.Printf("filter: %d rules from %s failed to parse and were skipped; samples: %s",
+			failureCount, listName, strings.Join(firstFailures, " | "))
+	}
 	log.Printf("filter: added %d rules, %d exceptions from %s", ruleCount, exceptionCount, listName)
 	return nil
 }
@@ -388,7 +399,12 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 	appliedRules, shouldBlock, redirectURL := f.networkRules.ModifyReq(req)
 	if shouldBlock {
 		f.actionObserver.OnFilterBlock(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
-		taplog.Log(reqLogFields("block", req, initialURL, appliedRules, processInfo))
+		// reqLogFields builds maps and URL strings for every call; gate it
+		// so the disabled diagnostic tap costs a single Enabled() check
+		// instead of per-request allocations (2026-10-13).
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("block", req, initialURL, appliedRules, processInfo))
+		}
 
 		if fetchmeta.IsUserNavigation(req) {
 			port := f.whitelistSrv.GetPort()
@@ -408,16 +424,20 @@ func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*ht
 
 	if redirectURL != "" {
 		f.actionObserver.OnFilterRedirect(req.Method, initialURL.String(), redirectURL, req.Header.Get("Referer"), appliedRules, processInfo)
-		taplog.Log(reqLogFields("redirect", req, initialURL, appliedRules, processInfo))
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("redirect", req, initialURL, appliedRules, processInfo))
+		}
 		return f.networkRules.CreateRedirectResponse(req, redirectURL), nil
 	}
 
 	if len(appliedRules) > 0 {
 		f.actionObserver.OnFilterModify(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
-		taplog.Log(reqLogFields("modify", req, initialURL, appliedRules, processInfo))
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("modify", req, initialURL, appliedRules, processInfo))
+		}
 	}
 
-	if len(appliedRules) == 0 {
+	if len(appliedRules) == 0 && taplog.Enabled() {
 		taplog.Log(reqLogFields("allow", req, initialURL, nil, processInfo))
 	}
 
@@ -482,12 +502,16 @@ func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processIn
 
 	appliedRules, err := f.networkRules.ModifyRes(req, res)
 	if err != nil {
-		taplog.Log(resLogFields("error", req, res, nil, err))
+		if taplog.Enabled() {
+			taplog.Log(resLogFields("error", req, res, nil, err))
+		}
 		return fmt.Errorf("apply network rules: %v", err)
 	}
 	if len(appliedRules) > 0 {
 		f.actionObserver.OnFilterModify(req.Method, req.URL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
-		taplog.Log(resLogFields("modify", req, res, appliedRules, nil))
+		if taplog.Enabled() {
+			taplog.Log(resLogFields("modify", req, res, appliedRules, nil))
+		}
 	}
 
 	return nil

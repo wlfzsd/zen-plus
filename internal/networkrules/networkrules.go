@@ -43,7 +43,19 @@ type NetworkRules struct {
 	// badfilters holds $badfilter rules collected at parse time (see
 	// badfilter.go, 2026-10-08 B6). They are applied once in Compact, after
 	// every filter list was fully loaded, and never inserted into a store.
+	// bfMu serializes the appends: list loading runs on parallel goroutines;
+	// the slice is only read after loading (applyBadfilters in Compact).
 	badfilters []badfilterRule
+	bfMu       sync.Mutex
+
+	// frozen marks the end of the load phase (set at the end of Compact).
+	// Afterwards the three stores are read-only for the rest of the
+	// process: serving goroutines read them without locks, so any write
+	// would race. ParseRule rejects non-exception rules once frozen and
+	// routes exception rules into liveExc (2026-10-13, live.go) — the
+	// whitelist server's allow-rule inserts are the only runtime writer.
+	frozen  atomic.Bool
+	liveExc liveExceptionStore
 
 	// 覆盖去重（2026-10-09，coveragededup.go）：装载期登记候选，Compact
 	// 在 applyBadfilters 之后一次性解析覆盖链并物理剪枝。covArmed 在
@@ -83,6 +95,7 @@ func New(opts ...NetworkRulesOption) *NetworkRules {
 		actionIdxOn:    true,
 		covOn:          true,
 	}
+	nr.liveExc.store = newRuleStore[*exceptionrule.ExceptionRule]()
 	nr.covArmed.Store(true)
 	for _, opt := range opts {
 		opt(nr)
@@ -132,6 +145,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	// Exceptions matching the request URL are judged per request (2026-10-08
 	// B2/H3): URL pattern hit plus the exception's own condition modifiers.
 	exceptions := nr.exceptionStore.Get(reqURL)
+	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
 		return er.ShouldMatchReq(req)
@@ -310,6 +324,7 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	// B2/H3): URL pattern on the request URL, condition modifiers against
 	// the request (ModifyReq/ModifyRes each pass their own req).
 	exceptions := nr.exceptionStore.Get(url)
+	exceptions = nr.liveExc.appendInto(url, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
 		return er.ShouldMatchReq(req)
@@ -362,6 +377,7 @@ func (nr *NetworkRules) ActiveExceptions(req *http.Request) exemption.Exemption 
 
 	reqURL := matchURL(req.URL)
 	exceptions := nr.exceptionStore.Get(reqURL)
+	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 
 	var ex exemption.Exemption
@@ -447,6 +463,7 @@ func (nr *NetworkRules) pageExceptions(req *http.Request, scope func(*exceptionr
 		return nil
 	}
 	excs := nr.exceptionStore.Get(pageURL)
+	excs = nr.liveExc.appendInto(pageURL, excs)
 	return filterInPlace(excs, func(er *exceptionrule.ExceptionRule) bool {
 		return scope(er) && er.ShouldMatchReq(req)
 	})
@@ -462,6 +479,9 @@ func (nr *NetworkRules) Compact() {
 	nr.applyCoverageDedup()
 	nr.primaryStore.Compact()
 	nr.exceptionStore.Compact()
+	// Freeze (2026-10-13): from here on the stores are read-only for
+	// serving; ParseRule routes runtime exception inserts into liveExc.
+	nr.frozen.Store(true)
 }
 
 // filterInPlace compacts arr in place, keeping only the elements that

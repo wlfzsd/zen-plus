@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/irbis-sh/zen-desktop/internal/asset/cosmetic"
 	"github.com/irbis-sh/zen-desktop/internal/asset/cssrule"
@@ -13,7 +14,6 @@ import (
 	"github.com/irbis-sh/zen-desktop/internal/asset/scriptlet"
 	"github.com/irbis-sh/zen-desktop/internal/csp"
 	"github.com/irbis-sh/zen-desktop/internal/exemption"
-	"github.com/irbis-sh/zen-desktop/internal/httprewrite"
 )
 
 const (
@@ -74,6 +74,17 @@ func NewEngine(host string) (*Engine, error) {
 
 // AddRule attempts to add a non-network rule. Returns handled=true if consumed.
 func (e *Engine) AddRule(rule string, filterListTrusted bool) (handled bool, err error) {
+	// Every asset family requires a '#' in the rule text (scriptlet `#%#`,
+	// cosmetic `#@?#`, extended CSS, CSS rule `#$#`, JS rule `#$#`), and
+	// this runs before cross-list dedup on every line of every list
+	// (internal/filter/filter.go addRule). A line without '#' can therefore
+	// decline the whole engine without running any family regex
+	// (2026-10-13 load fast path; zero false negatives for the negative
+	// case, since the families' own regexes all contain a literal '#').
+	if !strings.Contains(rule, "#") {
+		return false, nil
+	}
+
 	switch {
 	case scriptlet.RuleRegex.MatchString(rule):
 		if err := e.scriptlets.AddRule(rule, filterListTrusted); err != nil {
@@ -160,12 +171,14 @@ func (e *Engine) Inject(_ *http.Request, res *http.Response, ex ...exemption.Exe
 		return nil
 	}
 
-	if err := csp.PatchHeadersBatch(res, operations); err != nil {
-		return fmt.Errorf("patch CSP headers: %w", err)
-	}
+	// Header patching and the body rewrite are separate concerns now: the
+	// single body pass (2026-10-13) patches head meta CSPs and inserts the
+	// asset tags before </head> in one tokenizer scan instead of one
+	// full-body meta scan plus a second head-insertion pass.
+	csp.PatchCSPHeaders(res, operations)
 
-	if err := httprewrite.AppendHTMLHeadContents(res, injection.Bytes()); err != nil {
-		return fmt.Errorf("append head contents: %w", err)
+	if err := csp.PatchMetaCSPsAndInjectHead(res, injection.Bytes(), operations); err != nil {
+		return fmt.Errorf("patch meta CSP and inject head: %w", err)
 	}
 
 	return nil

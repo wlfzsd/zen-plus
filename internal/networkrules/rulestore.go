@@ -14,7 +14,11 @@ import (
 // ruleStore matches URLs against ad-block style patterns with associated data.
 type ruleStore[T comparable] struct {
 	tree *ruletree.Tree[T]
-	// generic is rules with an empty pattern, which match for every URL.
+	// loadMu guards the generic/regexp appends: list loading runs on
+	// parallel goroutines (internal/app/filter.go populateFilter), and only
+	// the tree branch serializes itself via ruletree's insertMu. Serving
+	// starts after loading completes, so reads need no lock.
+	loadMu  sync.Mutex
 	generic []T
 	regexp  []regexpRule[T]
 
@@ -75,7 +79,9 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
 	// The pattern is either generic (empty), regexp, or regular.
 	switch {
 	case pattern == "":
+		s.loadMu.Lock()
 		s.generic = append(s.generic, v)
+		s.loadMu.Unlock()
 	case len(pattern) > 1 && pattern[0] == '/' && pattern[len(pattern)-1] == '/':
 		body := pattern[1 : len(pattern)-1]
 		if body == "" {
@@ -85,14 +91,19 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
 		if err != nil {
 			return fmt.Errorf("compile regexp rule: %w", err)
 		}
+		// parseFastShape stays outside the lock: it is pure and potentially
+		// costly, and parallel loaders should not serialize on it.
+		fast := parseFastShape(body, re)
+		s.loadMu.Lock()
 		s.regexp = append(s.regexp, regexpRule[T]{
 			regexp: re,
-			fast:   parseFastShape(body, re),
+			fast:   fast,
 			value:  v,
 		})
 		// A previously built index indexes the OLD regexp slice; drop it so
 		// the next Get rebuilds against the new rules (2026-10-06).
 		s.idx.Store(nil)
+		s.loadMu.Unlock()
 	default:
 		s.tree.Insert(pattern, v)
 	}

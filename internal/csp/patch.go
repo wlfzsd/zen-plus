@@ -46,6 +46,22 @@ func PatchHeadersBatch(res *http.Response, operations []PatchOperation) error {
 	return nil
 }
 
+// PatchCSPHeaders patches only the CSP response headers, leaving the body
+// untouched. It is the header half of PatchHeadersBatch, split so the
+// document pipeline can combine header patching with a single-pass body
+// rewrite (see PatchMetaCSPsAndInjectHead) instead of paying PatchHeaders'
+// full-body meta scan plus a second head-insertion pass.
+func PatchCSPHeaders(res *http.Response, operations []PatchOperation) {
+	if res == nil || len(operations) == 0 {
+		return
+	}
+
+	for _, op := range operations {
+		patchOneHeader(res.Header, cspHeader, op.Nonce, op.Kind, op.ResourceURL)
+		patchOneHeader(res.Header, cspReportOnly, op.Nonce, op.Kind, op.ResourceURL)
+	}
+}
+
 // NewNonce generates a cryptographically random nonce for CSP.
 func NewNonce() string {
 	// From https://www.w3.org/TR/CSP3/#security-nonces:

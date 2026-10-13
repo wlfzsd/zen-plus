@@ -79,7 +79,9 @@ func (nr *NetworkRules) addBadfilter(pattern string, modifiers []string) {
 		}
 	}
 
+	nr.bfMu.Lock()
 	nr.badfilters = append(nr.badfilters, bf)
+	nr.bfMu.Unlock()
 }
 
 // textWithoutDomain strips the $domain modifier from a rule text so that
