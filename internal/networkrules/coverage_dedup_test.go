@@ -294,10 +294,15 @@ func TestCoverageDedupLiveInsertExempt(t *testing.T) {
 		t.Fatalf("live allowlist insert: %v", err)
 	}
 	// 再跑一次 Compact（幂等）：活插入的例外必须原样保留。
+	// 2026-10-13 起活插入进 liveExc（冻结店只读）：更强的豁免保证——
+	// 主存储物理上不再被运行时写入触碰。
 	nr.Compact()
 	_, e := countStored(t, nr)
-	if e != 1 {
-		t.Fatalf("exceptions=%d, want 1 (live-inserted rule exempt)", e)
+	if e != 0 {
+		t.Fatalf("frozen exceptionStore=%d, want 0 (must stay untouched after freeze)", e)
+	}
+	if n := nr.liveExc.n.Load(); n != 1 {
+		t.Fatalf("live store rules=%d, want 1 (live-inserted rule exempt)", n)
 	}
 	if block, _, _ := decision(t, nr, "https://live.test/x", false); block {
 		t.Fatal("live allowlist must keep unblocking")

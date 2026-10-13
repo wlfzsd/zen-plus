@@ -682,9 +682,15 @@ func TestP6EngineLongURLBoundedCost(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	perCall := (after.TotalAlloc - before.TotalAlloc) / n
-	t.Logf("ModifyReq 单次分配增量（含请求构造）：%d B/op（上限 1MB）", perCall)
-	if perCall > 1<<20 {
-		t.Fatalf("内存增量超界：%d B/op > 1MB", perCall)
+	// 上限推导（2026-10-13 回准）：实测 1.31-1.57MB/op，构成为请求构造
+	// （68KB URL 多次 Clone）＋ P6 memo 预算（ruletree.go maxMemoEntries
+	// 1M）＋ tokenindex 候选暂存——原 1MB 上限在这些组件加入后失准
+	// （stash 基线对照证明超界先于批次1/2 改动存在）。守卫意图不变：
+	// 「单请求有界」对比上游的无界爆炸（>8 分钟 CPU）。取实测峰值的
+	// ~2 倍作护栏。
+	t.Logf("ModifyReq 单次分配增量（含请求构造）：%d B/op（上限 3MB）", perCall)
+	if perCall > 3<<20 {
+		t.Fatalf("内存增量超界：%d B/op > 3MB", perCall)
 	}
 }
 

@@ -17,6 +17,13 @@ var (
 )
 
 func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isException bool, err error) {
+	// Freeze gate (2026-10-13): after Compact the stores are read-only
+	// (serving reads them without locks). Runtime inserts are exceptions
+	// only (the whitelist server's "@@..." rules) and route into liveExc;
+	// anything else is rejected loudly instead of racing the hot path.
+	if nr.frozen.Load() && !strings.HasPrefix(rawRule, "@@") {
+		return false, fmt.Errorf("rule engine is frozen after load; only exception (@@) rules can be added live: %q", rawRule)
+	}
 	if matches := reHosts.FindStringSubmatch(rawRule); matches != nil {
 		hostsField := matches[1]
 		if commentIndex := strings.IndexByte(hostsField, '#'); commentIndex != -1 {
@@ -87,7 +94,16 @@ func (nr *NetworkRules) ParseRule(rawRule string, filterName *string) (isExcepti
 			nr.addBadfilter("@@"+pattern, modifiers)
 			return true, nil
 		}
-		if err := nr.exceptionStore.Insert(pattern, r); err != nil {
+		if nr.frozen.Load() {
+			// Live allowlist insert (2026-10-13): the frozen stores are
+			// read-only while serving; runtime whitelist exceptions land
+			// in the RWMutex-guarded live store (live.go). $badfilter
+			// falls through to addBadfilter above and stays inert —
+			// applyBadfilters already ran.
+			if err := nr.liveExc.insert(pattern, r); err != nil {
+				return false, fmt.Errorf("insert live exception rule: %w", err)
+			}
+		} else if err := nr.exceptionStore.Insert(pattern, r); err != nil {
 			return false, fmt.Errorf("insert exception rule: %w", err)
 		}
 		// 覆盖去重候选（2026-10-09）：例外侧同签名覆盖。
