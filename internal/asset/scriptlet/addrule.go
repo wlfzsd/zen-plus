@@ -22,7 +22,7 @@ var (
 	// as RuleRegex runs before the other rule types.
 	RuleRegex = regexp.MustCompile(`^[^#]*(?:#@?%#\/\/scriptlet|#@?#\+js)`)
 
-	canonicalPrimary        = regexp.MustCompile(`^([^#]*)#%#\/\/scriptlet\((.+)\)`)
+	canonicalPrimary = regexp.MustCompile(`^([^#]*)#%#\/\/scriptlet\((.+)\)`)
 	// [B4 2026-10-08] Exception rules may carry an empty argument list: a
 	// nameless exception disables every scriptlet on the hostnames, so the
 	// argument-list capture allows zero arguments. Primary rules still
@@ -85,7 +85,7 @@ var nameAliases = map[string]string{
 	"std":                "prevent-setTimeout",
 	"sto":                "prevent-setTimeout",
 	// prevent-window-open.js
-	"no-window-open-if":  "prevent-window-open",
+	"no-window-open-if":   "prevent-window-open",
 	"window.open-defuser": "prevent-window-open",
 	// remove-attr.js
 	"ra": "remove-attr",
@@ -100,8 +100,8 @@ var nameAliases = map[string]string{
 	// abp-override-property-read, after the "abp-" prefix is stripped
 	"override-property-read": "set-constant",
 	// log-addEventListener.ts
-	"aell":                     "log-addEventListener",
-	"addEventListener-logger":  "log-addEventListener",
+	"aell":                    "log-addEventListener",
+	"addEventListener-logger": "log-addEventListener",
 }
 
 // normalizeScriptletName reduces a scriptlet name argument to the form the

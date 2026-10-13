@@ -399,16 +399,8 @@ var migrations = []migration{
 		log.Printf("v0.25.0 migration: moved autostart entry to the autostart directory")
 		return nil
 	}},
-	{"v0.26.1", func(c *Config) error {
-		// Configs written before v0.26.0 have no keyStorage; their CA is on disk. This migration
-		// shipped after v0.26.0, so a config may already say "hardware" and must keep it.
-		return c.update(func() error {
-			if c.Certmanager.KeyStorage == "" {
-				c.Certmanager.KeyStorage = KeyStorageDisk
-			}
-			return nil
-		})
-	}},
+	// v0.26.1 的 CA keyStorage 迁移（#815）未移植：本分支 config 结构基于
+	// v0.25.1，无 KeyStorage 字段——该项对本分支无意义。
 	{"v0.27.0", func(c *Config) error {
 		// Move the AdGuard lists from their unbuilt sources to AdGuard's builds
 		// for its Windows app. The unbuilt lists mark platform-specific rules

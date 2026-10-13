@@ -3,6 +3,8 @@ package asset
 import (
 	"bytes"
 	"testing"
+
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
 )
 
 func TestAddRuleRoutesByFirstMarker(t *testing.T) {
@@ -35,7 +37,7 @@ func TestAddRuleRoutesByFirstMarker(t *testing.T) {
 			}
 
 			for _, path := range []string{cosmeticCSSPath, cssRulePath, extendedCSSPath, jsRulePath} {
-				body, err := e.assetBytes(tt.hostname, path)
+				body, err := e.assetBytes(tt.hostname, path, exemption.Exemption{})
 				if err != nil {
 					t.Fatalf("assetBytes(%q, %q): %v", tt.hostname, path, err)
 				}
@@ -72,10 +74,10 @@ func TestExceptionWithIDSelectorCancelsGenericRule(t *testing.T) {
 		}
 	}
 
-	if body, _ := e.assetBytes("so-net.ne.jp", cosmeticCSSPath); body != nil {
+	if body, _ := e.assetBytes("so-net.ne.jp", cosmeticCSSPath, exemption.Exemption{}); body != nil {
 		t.Errorf("cosmetic CSS for so-net.ne.jp = %q, want none", body)
 	}
-	if body, _ := e.assetBytes("example.org", cosmeticCSSPath); !bytes.Contains(body, []byte("#ad-p3")) {
+	if body, _ := e.assetBytes("example.org", cosmeticCSSPath, exemption.Exemption{}); !bytes.Contains(body, []byte("#ad-p3")) {
 		t.Errorf("cosmetic CSS for example.org = %q, want it to hide #ad-p3", body)
 	}
 }

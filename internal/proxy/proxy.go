@@ -851,9 +851,7 @@ func isTLSError(err error) bool {
 // in which nothing is filtered, and latch events are logged separately with
 // no host filter.
 func taplogConn(host, mode, reason string) {
-	if taplog.WatchedHost(host) {
-		taplog.Log(map[string]any{"kind": "conn", "host": host, "mode": mode, "reason": reason})
-	}
+	taplog.Log(map[string]any{"kind": "conn", "host": host, "mode": mode, "reason": reason})
 }
 
 // isCloseable returns true if the error is one that indicates the connection
