@@ -12,39 +12,38 @@
 
 # zen-plus：比官方最新版更快、更省、更全能的 Zen
 
-**zen-plus 是 [Zen](https://github.com/irbis-sh/zen-desktop) 的增强分支**。同一套规则、同一台机器、同一批真实 URL 实测：**过滤引擎快 35%，每请求内存分配少 73 倍，驻留内存少 10.5%——而且是在多装了 9,490 条规则的前提下**。官方最新版（v0.26.0）没有的能力——TLS 指纹镜像、HTTP/2 出站重放、上游代理链——zen-plus 全都有。
+**zen-plus 是 [Zen](https://github.com/irbis-sh/zen-desktop) 的增强分支**。同一套规则、同一台机器、同一批真实 URL 实测（对比官方最新版 v0.27.1）：**过滤引擎快 4 倍（官方耗时是我们的 4.0 倍），每请求内存分配少 64 倍，驻留内存少 10.2%——而且是在多装了 9,490 条规则的前提下**。官方没有的能力——HTTP/2 协议层指纹重放、上游代理链——zen-plus 全都有；TLS 指纹镜像官方 v0.27.1 刚补上 ClientHello 层，zen-plus 覆盖 TLS+h2 全层。
 
 > 上游归属：本项目基于 [irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop)（MIT License，Copyright (c) 2026 Irbis & Zen contributors）。上游全部提交历史完整保留在 `master` 分支，本地增强在 `upstream-chain` 分支。
 
 ---
 
-### 一张表看懂 zen-plus vs 官方最新版 v0.26.0
+### 一张表看懂 zen-plus vs 官方最新版 v0.27.1
 
-实测条件：同一台机器、同一套 13 个过滤列表（54.5 万条规则生产同构装载）、35,358 条真实 URL/遍、5 轮取中位、单线程固定。拦截判定测试全集 0 失败。
+实测条件：同一台机器、同一套 13 个过滤列表生产同构装载（zen-plus 装载 566,656 条；官方解析失败静默丢弃 11,890 条、实装 557,166 条）、35,358 条真实 URL/遍、内存两轮零波动、单线程固定。基准装置随仓库公开（abbench）。
 
-| 对比项 | 官方 v0.26.0 | **zen-plus v3.1.0** | 结果 |
+| 对比项 | 官方 v0.27.1 | **zen-plus v3.1.8** | 结果 |
 |---|---|---|---|
-| 引擎匹配速度（每请求） | 234.8 µs | **153.1 µs** | **zen-plus 快 34.8%** |
-| 引擎匹配速度（XHR/fetch 型） | 282.4 µs | **177.2 µs** | **zen-plus 快 37.3%** |
-| 每请求内存分配 | 149.3 KB / 1,625 次 | **2.03 KB / 13 次** | **分配少 73 倍 / 124 倍** |
-| 引擎驻留内存（装载后 GC） | 205.5 MB | **184.0 MB** | **-10.5%** |
-| 实际装载规则数 | 535,887 | **545,377** | **多装 9,490 条** |
-| 规则解析失败（静默丢弃） | 11,867 | **2,377** | **少丢 9,490 条** |
-| 相同流量 CPU 开销 | 3.91 ms/req | **2.71 ms/req** | **CPU 低 31%** |
-| TLS 指纹一致性 | ✗ 无此功能 | **JA3 与直连逐字节一致** | **官方完全缺失** |
-| HTTP/2 出站重放 | ✗ | ✅ | **官方完全缺失** |
-| 上游代理链 | ✗ | ✅ HTTP/HTTPS/SOCKS5 | **官方完全缺失** |
-| 拦截覆盖（obfusgated 359 域名实测） | 604 点 / 302 域 | **610 点 / 305 域** | **zen-plus ⊇ 官方，0 反超** |
+| 引擎匹配速度（每请求） | 540.5 µs | **134.8 µs** | **zen-plus 快 4.0 倍** |
+| 引擎匹配速度（XHR/fetch 型） | 630.5 µs | **175.4 µs** | **zen-plus 快 3.6 倍** |
+| 引擎改写速度（响应期） | 299.1 µs | **116.0 µs** | **zen-plus 快 2.6 倍** |
+| 每请求内存分配（请求期） | 149.5 KB / 1,626 次 | **2.32 KB / 14 次** | **分配少 64 倍 / 119 倍** |
+| 引擎驻留内存（装载后 GC） | 150.9 MB | **135.5 MB** | **-10.2%（且多装 9,490 条）** |
+| 实际装载规则数 | 557,166 | **566,656** | **多装 9,490 条** |
+| 规则解析失败（静默丢弃） | 11,890 | **2,400** | **少丢 9,490 条** |
+| TLS 指纹一致性 | ✅ v0.27.1 新增（仅 ClientHello 层） | **TLS+h2 全层** | **覆盖面不同** |
+| HTTP/2 协议层指纹重放 | ✗ | ✅ | **官方缺失** |
+| 上游代理链 | ✗ | ✅ HTTP/HTTPS/SOCKS5 | **官方缺失** |
 
 ---
 
-### ✊ 内存那行 "-10.5%" 背后的真相：少 10% 内存，多 9,490 条规则
+### ✊ 内存那行 "-10.2%" 背后的真相：少 10% 内存，多 9,490 条规则
 
-单看 "-10.5%" 好像不大——**但这是在 zen-plus 多装载了 9,490 条规则的同时实现的**。
+单看 "-10.2%" 好像不大——**但这是在 zen-plus 多装载了 9,490 条规则的同时实现的**（官方 v0.27.1 的解析器把 **11,890 条规则静默丢弃**、解析失败零报错，zen-plus 只丢 2,400 条；被丢的规则里包括拦截手机厂商广告域的 `$denyallow` 规则——此前实测 oppo 广告域名官方放行、zen-plus 拦截，拦截覆盖严格包含官方、零反超）。折算到"每条实装规则的驻留成本"：官方 271 B/条，zen-plus **239 B/条（-11.9%）**。
 
-官方 v0.26.0 的解析器会把 **11,867 条规则静默丢弃**（解析失败零报错），zen-plus 只丢 2,377 条。差距在哪：EasyList **3,139 vs 7**、AdGuard Base **6,314 vs 1,394**、AdGuard Spyware **1,465 vs 327**、AdGuard CN **903 vs 609**。这些被官方丢掉的规则里，就包括拦截手机厂商广告域的 `$denyallow` 规则——实测 oppo 广告域名（adx/ck/data.ads.oppomobile.com）官方放行、zen-plus 拦截，且 zen-plus 的拦截覆盖**严格包含**官方（604 个命中点 zen-plus 全拦，无一反超）。
+相对 zen-plus 自身上一版（v3.1.7 引擎态），本轮优化（打包字节前缀＋反向索引分支集）再降 live 堆 **18.7%**（166.6→135.4 MB，同机同列表同语料实测）、装载峰值 **-58.9 MB**。
 
-**多装近一万条规则 + 更省内存 + 更快匹配**，三件事同时成立，这就是引擎重写的价值。
+**多装近一万条规则 + 更省内存 + 匹配快 4 倍**，三件事同时成立，这就是引擎重写的价值。
 
 ---
 
@@ -81,7 +80,7 @@ zen-plus 以 **AdGuard 官方过滤语法语义**为对齐目标逐批实现：�
 
 ### 📌 附：对更早基线（v0.25.1）的历史实测
 
-zen-plus 引擎重写的完整收益在对官方 v0.26.0 的上表中；相对更早的 v0.25.1 基线端到端实测为：匹配 -60.7%、分配 -93.4%、每规则内存 -21.5%（多轮中位，明细见 [docs/benchmarks/](docs/benchmarks/)）。此外 zen-plus 修复了两个上游至今（v0.26.0 未修，源码级核实）的问题：
+zen-plus 引擎重写的完整收益在对官方 v0.27.1 的上表中；相对更早的 v0.25.1 基线端到端实测为：匹配 -60.7%、分配 -93.4%、每规则内存 -21.5%（多轮中位，明细见 [docs/benchmarks/](docs/benchmarks/)）。此外 zen-plus 修复了两个上游至今（v0.26.0 未修，源码级核实）的问题：
 
 - **过滤开关反复切换导致内存翻倍增长**（上游每次开关泄漏连接服务器/证书生成器/隧道，zen-plus 全部收割，提交 `81efce0`、`fb7e6a7`）；
 - **对抗性超长 URL 遍历爆炸**（68KB 对抗 URL 曾达分钟级 CPU + 183MB 内存，zen-plus 修复至 ~1ms / ~0.7MB）。
@@ -121,39 +120,38 @@ MIT（保留上游 [LICENSE](LICENSE)）。上游项目与团队：[irbis-sh/zen
 
 # zen-plus: faster, leaner, and far more capable than the official latest release
 
-**zen-plus is an enhanced fork of [Zen](https://github.com/irbis-sh/zen-desktop)**. Measured on the same machine, the same rule set, the same real-world URL corpus: **the filter engine is 35% faster, per-request allocations are 73× smaller, resident memory is 10.5% lower — all while loading 9,490 MORE rules**. And it ships what the official latest release (v0.26.0) simply does not have: TLS fingerprint mirroring, HTTP/2 outbound replay, and an upstream proxy chain.
+**zen-plus is an enhanced fork of [Zen](https://github.com/irbis-sh/zen-desktop)**. Measured on the same machine, the same rule set, the same real-world URL corpus (against the official latest release v0.27.1): **the filter engine is 4× faster (official takes 4.0× as long), per-request allocations are 64× smaller, resident memory is 10.2% lower — all while loading 9,490 MORE rules**. It also ships what official has no answer for: HTTP/2 protocol-layer fingerprint replay and an upstream proxy chain; for TLS fingerprint mirroring, official v0.27.1 just added the ClientHello layer, while zen-plus covers TLS and h2 end to end.
 
 > Attribution: based on [irbis-sh/zen-desktop](https://github.com/irbis-sh/zen-desktop) (MIT License, Copyright (c) 2026 Irbis & Zen contributors). The complete upstream commit history is preserved on the `master` branch; local enhancements live on `upstream-chain`.
 
 ---
 
-### zen-plus vs official v0.26.0 at a glance
+### zen-plus vs official v0.27.1 at a glance
 
-Measured on the same machine, same 13 filter lists (545k rules loaded production-style), 35,358 real URLs per pass, median of 5 rounds, single-thread pinned. Zero failures across the entire blocking-decision test set.
+Measured on the same machine, same 13 filter lists loaded production-style (zen-plus loads 566,656 rules; official silently drops 11,890 on parse failures and loads 557,166), 35,358 real URLs per pass, memory stable across two rounds, single-thread pinned. The benchmark harness ships with the repository (abbench).
 
-| Item | Official v0.26.0 | **zen-plus v3.1.0** | Result |
+| Item | Official v0.27.1 | **zen-plus v3.1.8** | Result |
 |---|---|---|---|
-| Engine matching time / request | 234.8 µs | **153.1 µs** | **34.8% faster** |
-| Engine matching (XHR/fetch-type) | 282.4 µs | **177.2 µs** | **37.3% faster** |
-| Heap allocations / request | 149.3 KB / 1,625 | **2.03 KB / 13** | **73× / 124× fewer** |
-| Engine live memory (after load, post-GC) | 205.5 MB | **184.0 MB** | **-10.5%** |
-| Rules actually loaded | 535,887 | **545,377** | **+9,490 rules** |
-| Parse failures (silently dropped) | 11,867 | **2,377** | **9,490 fewer dropped** |
-| CPU for identical traffic | 3.91 ms/req | **2.71 ms/req** | **31% less CPU** |
-| TLS fingerprint consistency | ✗ none | **JA3 byte-identical to direct** | **missing upstream** |
-| HTTP/2 outbound replay | ✗ | ✅ | **missing upstream** |
+| Engine matching time / request | 540.5 µs | **134.8 µs** | **4.0× faster** |
+| Engine matching (XHR/fetch-type) | 630.5 µs | **175.4 µs** | **3.6× faster** |
+| Engine rewrite (response phase) | 299.1 µs | **116.0 µs** | **2.6× faster** |
+| Heap allocations / request | 149.5 KB / 1,626 | **2.32 KB / 14** | **64× / 119× fewer** |
+| Engine live memory (after load, post-GC) | 150.9 MB | **135.5 MB** | **-10.2% (with 9,490 more rules)** |
+| Rules actually loaded | 557,166 | **566,656** | **+9,490 rules** |
+| Parse failures (silently dropped) | 11,890 | **2,400** | **9,490 fewer dropped** |
+| TLS fingerprint consistency | ✅ new in v0.27.1 (ClientHello only) | **TLS + h2, full stack** | **different coverage** |
+| HTTP/2 protocol-layer fingerprint replay | ✗ | ✅ | **missing upstream** |
 | Upstream proxy chain | ✗ | ✅ HTTP/HTTPS/SOCKS5 | **missing upstream** |
-| Blocking coverage (obfusgated 359-domain test) | 604 hits / 302 domains | **610 / 305** | **superset, zero reversals** |
 
 ---
 
-### ✊ The truth behind that "-10.5%": less memory AND 9,490 more rules
+### ✊ The truth behind that "-10.2%": less memory AND 9,490 more rules
 
-A 10.5% memory reduction sounds modest — **until you notice zen-plus achieved it while loading 9,490 MORE rules**.
+A 10.2% memory reduction sounds modest — **until you notice zen-plus achieved it while loading 9,490 MORE rules**. The official v0.27.1 parser silently drops **11,890 rules** (parse failures are discarded without any error), while zen-plus drops only 2,400. Among the rules upstream drops are `$denyallow` rules covering phone-vendor ad domains — in an earlier real test, oppo ad domains (adx/ck/data.ads.oppomobile.com) are allowed by official and blocked by zen-plus, and zen-plus's blocking set is a **strict superset** of upstream's (zero reversals). Per stored rule, resident cost is 271 B for official vs **239 B for zen-plus (-11.9%)**.
 
-The official v0.26.0 parser silently drops **11,867 rules** (parse failures are discarded without any error), while zen-plus drops only 2,377. The gap: EasyList **3,139 vs 7**, AdGuard Base **6,314 vs 1,394**, AdGuard Spyware **1,465 vs 327**, AdGuard CN **903 vs 609**. Among the rules upstream drops are `$denyallow` rules covering phone-vendor ad domains — in a real test, oppo ad domains (adx/ck/data.ads.oppomobile.com) are allowed by official and blocked by zen-plus, and zen-plus's blocking set is a **strict superset** of upstream's (all 604 upstream hits are blocked here, zero reversals).
+Against zen-plus's own previous engine (v3.1.7 state), this round of optimizations (packed byte prefixes + reverse-index branch sets) cuts live heap by another **18.7%** (166.6→135.4 MB, same machine/list/corpus) and load peak by **58.9 MB**.
 
-**More rules, less memory, faster matching — all three at once. That is what rewriting the engine buys you.**
+**More rules, less memory, 4× faster matching — all three at once. That is what rewriting the engine buys you.**
 
 ---
 
@@ -190,7 +188,7 @@ The result is the table above: **the ~9,490 rules upstream drops — most of the
 
 ### 📌 Note: historical measurements against the older v0.25.1 baseline
 
-The full rewrite payoff against official v0.26.0 is the table above. Against the older v0.25.1 baseline, end-to-end measurements were: matching -60.7%, allocations -93.4%, per-rule memory -21.5% (multi-round medians, details in [docs/benchmarks/](docs/benchmarks/)). zen-plus also fixed two problems that remain unfixed upstream (still absent in v0.26.0, verified at source level):
+The full rewrite payoff against official v0.27.1 is the table above. Against the older v0.25.1 baseline, end-to-end measurements were: matching -60.7%, allocations -93.4%, per-rule memory -21.5% (multi-round medians, details in [docs/benchmarks/](docs/benchmarks/)). zen-plus also fixed two problems that remain unfixed upstream (still absent in v0.26.0, verified at source level):
 
 - **Memory doubling when toggling ad-blocking on/off** (upstream leaks connection servers / retired certificate generators / tunnels on every toggle; zen-plus reaps all of them, commits `81efce0`, `fb7e6a7`);
 - **Traversal explosion on adversarial long URLs** (a 68KB adversarial URL cost minutes of CPU and 183MB of memory; fixed to ~1ms / ~0.7MB in zen-plus).
