@@ -35,6 +35,95 @@ type Tree[T Data] struct {
 	// tailPool (2026-10-08 P6 memo) backs the per-call wildcard-tail
 	// subsumption maps (tail node → smallest walked offset).
 	tailPool sync.Pool
+
+	// arena (2026-10-13 内存轴；2026-10-14 阶段1c 接线 1B 打包) packs node
+	// prefix tokens into large chunks as PACKED BYTES (1 byte per token,
+	// escapes for 0xFA-0xFF literals — see tokenize.go). Previously every
+	// node's prefix pointed into tokenize()'s per-pattern allocation
+	// (append-grown, cap up to 2×len) and then into 2-byte token chunks;
+	// the packed arena stores exactly the packed prefix bytes of all nodes,
+	// halving the footprint. Used only under insertMu (Insert); readers
+	// (Get/GetLP/Walk/Compact/PruneValues) see immutable bytes.
+	arena tokenArena
+	// tkScratch reuses the per-Insert tokenize buffer (under insertMu).
+	tkScratch []token
+}
+
+// tokenArenaChunkBytes sizes one arena chunk: 64 KiB of packed prefix bytes,
+// so a full 792k-rule load lands in ~80 chunks (visible as few heap objects).
+const tokenArenaChunkBytes = 1 << 16
+
+// tokenArena hands out exactly-sized packed-byte ranges carved from big
+// chunks (2026-10-14 阶段1c：1 字节/token，见 tokenize.go 编码).
+type tokenArena struct {
+	chunks [][]byte
+	cur    []byte
+}
+
+func (a *tokenArena) alloc(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	if len(a.cur) < n {
+		size := tokenArenaChunkBytes
+		if n > size {
+			size = n
+		}
+		a.cur = make([]byte, size)
+		a.chunks = append(a.chunks, a.cur)
+	}
+	out := a.cur[:n:n]
+	a.cur = a.cur[n:]
+	return out
+}
+
+// packLen reports the packed byte length of one token: 1, or 2 for escaped
+// literals 0xFA-0xFF.
+func packLen(tk token) int {
+	if tk <= token(packLitMax) || tk > 255 {
+		return 1
+	}
+	return 2
+}
+
+// arenaPack packs s into the arena as packed bytes (tokenize.go encoding) and
+// returns the base pointer and packed byte length, replacing prefixBaseOf on
+// freshly tokenized patterns so nodes no longer pin whole per-pattern
+// allocations. Empty s returns (nil, 0).
+func (t *Tree[T]) arenaPack(s []token) (*byte, int) {
+	n := 0
+	for _, tk := range s {
+		n += packLen(tk)
+	}
+	if n == 0 {
+		return nil, 0
+	}
+	p := t.arena.alloc(n)
+	off := 0
+	for _, tk := range s {
+		switch {
+		case tk <= token(packLitMax):
+			p[off] = byte(tk)
+			off++
+		case tk <= 255:
+			p[off] = packEscape
+			p[off+1] = byte(tk)
+			off += 2
+		case tk == tokenWildcard:
+			p[off] = packWildcard
+			off++
+		case tk == tokenDomainBoundary:
+			p[off] = packDomain
+			off++
+		case tk == tokenSeparator:
+			p[off] = packSeparator
+			off++
+		default:
+			p[off] = packAnchor
+			off++
+		}
+	}
+	return &p[0], n
 }
 
 // MaxVisitedEntries (2026-10-08 P6 budget) caps the per-call (node, offset)
@@ -82,16 +171,20 @@ func (t *Tree[T]) Insert(pattern string, v T) {
 	var parent *node[T]
 	var n *node[T]
 
-	tokens := tokenize(pattern)
+	t.insertMu.Lock()
+	defer t.insertMu.Unlock()
+
+	// 2026-10-13 内存轴: tokenize into the per-Tree scratch (no per-pattern
+	// allocation); node prefixes are copied into the arena below, so the
+	// scratch is dead weight the moment this Insert returns.
+	tokens := tokenizeInto(pattern, t.tkScratch[:0])
+	t.tkScratch = tokens[:0]
 
 	for i := 1; i < len(tokens); i++ {
 		if tokens[i] == tokenDomainBoundary {
 			return
 		}
 	}
-
-	t.insertMu.Lock()
-	defer t.insertMu.Unlock()
 
 	switch tokens[0] {
 	case tokenDomainBoundary:
@@ -116,40 +209,43 @@ func (t *Tree[T]) Insert(pattern string, v T) {
 		n = n.getEdge(tokens[0])
 
 		if n == nil {
+			base, plen := t.arenaPack(tokens)
 			n := &node[T]{
-				prefixBase: prefixBaseOf(tokens),
-				prefixLen:  len(tokens),
+				prefixBase: base,
+				prefixLen:  plen,
 				leaf:       []T{v},
 			}
 			parent.addEdge(tokens[0], n)
 			return
 		}
 
-		commonPrefix := longestPrefix(tokens, n.prefixSlice())
-		if commonPrefix == n.prefixLen {
-			tokens = tokens[commonPrefix:]
+		commonTokens, commonBytes := longestPrefixPacked(tokens, n.prefixSlice())
+		if commonBytes == n.prefixLen {
+			tokens = tokens[commonTokens:]
 			continue
 		}
 
+		cbase, clen := t.arenaPack(tokens[:commonTokens])
 		child := &node[T]{
-			prefixBase: prefixBaseOf(tokens[:commonPrefix]),
-			prefixLen:  commonPrefix,
+			prefixBase: cbase,
+			prefixLen:  clen,
 		}
 		parent.updateEdge(tokens[0], child)
 
-		child.addEdge(n.prefixSlice()[commonPrefix], n)
-		n.advancePrefix(commonPrefix)
+		child.addEdge(unpackAt(n.prefixSlice(), commonBytes), n)
+		n.advancePrefix(commonBytes)
 
 		l := []T{v}
-		if commonPrefix == len(tokens) {
+		if commonTokens == len(tokens) {
 			child.leaf = l
 		} else {
+			nbase, nlen := t.arenaPack(tokens[commonTokens:])
 			n := &node[T]{
 				leaf:       l,
-				prefixBase: prefixBaseOf(tokens[commonPrefix:]),
-				prefixLen:  len(tokens) - commonPrefix,
+				prefixBase: nbase,
+				prefixLen:  nlen,
 			}
-			child.addEdge(tokens[commonPrefix], n)
+			child.addEdge(tokens[commonTokens], n)
 		}
 		return
 	}
@@ -361,17 +457,68 @@ func (t *Tree[T]) Walk(fn func(T)) {
 	rec(t.anchorRoot)
 }
 
-func longestPrefix(a, b []token) int {
-	maxLen := len(a)
-	if l := len(b); l < maxLen {
-		maxLen = l
-	}
-	for i := range maxLen {
-		if a[i] != b[i] {
-			return i
+// longestPrefixPacked compares the token slice against a packed prefix and
+// returns (k, cp): the number of shared leading tokens and the packed byte
+// length of that shared prefix. Whole-token units only — escape pairs are
+// never split (tokenize.go encoding contract).
+func longestPrefixPacked(tokens []token, packed []byte) (int, int) {
+	k, cp := 0, 0
+	for k < len(tokens) && cp < len(packed) {
+		tk := tokens[k]
+		switch {
+		case tk <= token(packLitMax):
+			if packed[cp] != byte(tk) {
+				return k, cp
+			}
+			cp++
+		case tk <= 255:
+			if cp+1 >= len(packed) || packed[cp] != packEscape || packed[cp+1] != byte(tk) {
+				return k, cp
+			}
+			cp += 2
+		case tk == tokenWildcard:
+			if packed[cp] != packWildcard {
+				return k, cp
+			}
+			cp++
+		case tk == tokenDomainBoundary:
+			if packed[cp] != packDomain {
+				return k, cp
+			}
+			cp++
+		case tk == tokenSeparator:
+			if packed[cp] != packSeparator {
+				return k, cp
+			}
+			cp++
+		default: // tokenAnchor
+			if packed[cp] != packAnchor {
+				return k, cp
+			}
+			cp++
 		}
+		k++
 	}
-	return maxLen
+	return k, cp
+}
+
+// unpackAt decodes the token starting at packed[off] (off is always a token
+// boundary: escape pairs are never split).
+func unpackAt(packed []byte, off int) token {
+	switch b := packed[off]; b {
+	case packWildcard:
+		return tokenWildcard
+	case packSeparator:
+		return tokenSeparator
+	case packAnchor:
+		return tokenAnchor
+	case packDomain:
+		return tokenDomainBoundary
+	case packEscape:
+		return token(packed[off+1])
+	default:
+		return token(b)
+	}
 }
 
 // traversalMarkers indicate traversal starting points in a URL.

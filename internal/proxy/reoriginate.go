@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -52,6 +53,17 @@ type mimicRoundTripper struct {
 	h2t    map[string]*fhttp2.Transport // per-target h2 transports (knobs baked at first dial)
 	h1Only map[string]bool              // targets whose wire path cannot honor h2
 	h1t    *fhttp.Transport             // shared h1-only transport
+
+	// h2Fails tracks recent h2-leg failures per target for the adaptive
+	// h1Only latch [2026-10-13 h2腿挂死修复]. Guarded by mu. A success
+	// clears the target's streak; the latch itself is markH1Only.
+	h2Fails map[string]*h2FailState
+}
+
+// h2FailState is one target's in-window failure streak.
+type h2FailState struct {
+	count int
+	last  time.Time
 }
 
 // chainedH2ReadIdleTimeout / chainedH2PingTimeout arm fhttp2's built-in ping
@@ -74,6 +86,44 @@ type mimicRoundTripper struct {
 const (
 	chainedH2ReadIdleTimeout = 20 * time.Second
 	chainedH2PingTimeout     = 20 * time.Second
+
+	// chainedH2DialTimeout bounds each h2 mirror leg dial [2026-10-13 h2腿
+	// 挂死修复]. The h2 transport dials from inside fhttp2 with no request
+	// context (context.Background()), so an edge that accepts the tunnel but
+	// stalls the mirrored handshake used to hang the dial - and every request
+	// it carries - forever and silently (实测 2026-10-13: caiyuanbao.alicdn.com
+	// h2 腿 25s 客户端超时、Zen 日志零行；www.alicdn.com 握手期 RST→502；同一
+	// URL h1 腿 131ms、g.alicdn.com h2 腿 118ms 正常). The h1 leg is bounded
+	// by chainedResponseHeaderTimeout (30s); the h2 leg now gets a dial-stage
+	// bound of the same order. Sized above multi-second upstream spikes
+	// (healthy chained dial+handshake 实测 <0.2s), below any user-acceptable
+	// wait, and paired with the failure latch below so the third failure pins
+	// the target to the proven h1 mirror leg instead of re-entering the doom.
+	chainedH2DialTimeout = 15 * time.Second
+
+	// chainedH2TTFBTimeout bounds the wait for response HEADERS on the h2
+	// mirror leg [2026-10-14 流级挂死修复]. Live shape (2026-10-14 08:52 实弹):
+	// the caiyuanbao.alicdn.com edge answers HEAD in 16ms and answers h2
+	// PINGs, but never sends HEADERS for GET streams - the pooled connection
+	// passes every connection-level health check while the stream hangs
+	// forever, so neither the ping liveness nor the failure latch (which only
+	// counts returned errors) can see it; the request waits until the client
+	// gives up (Chrome ~15s). Sized to the h1 leg's
+	// chainedResponseHeaderTimeout (30s): a headers-only bound - once headers
+	// arrive the guard stops and the body streams unbounded, so long video
+	// transfers are never killed (the exact concern that kept a stream-level
+	// hard bound out on 2026-10-13). On timeout the request completes on the
+	// h1 mirror leg via the dial-handoff shape and the streak feeds the
+	// existing failure latch.
+	chainedH2TTFBTimeout = 30 * time.Second
+
+	// h2 failure latch [2026-10-13]: h2FailLatchThreshold failures within
+	// h2FailLatchWindow pin the target to the h1 mirror leg (markH1Only),
+	// extending the existing "fall back honestly" semantics from ALPN-alert
+	// shapes to hang/RST shapes that never raise an alert. A healthy h2
+	// roundtrip clears the streak, so isolated blips never accumulate.
+	h2FailLatchThreshold = 3
+	h2FailLatchWindow    = 10 * time.Minute
 )
 
 func newMimicRoundTripper(p *Proxy, stockTLSCfg func() *tls.Config) *mimicRoundTripper {
@@ -82,6 +132,7 @@ func newMimicRoundTripper(p *Proxy, stockTLSCfg func() *tls.Config) *mimicRoundT
 		stockTLSCfg: stockTLSCfg,
 		h2t:         make(map[string]*fhttp2.Transport),
 		h1Only:      make(map[string]bool),
+		h2Fails:     make(map[string]*h2FailState),
 	}
 	// TLSNextProto emptied on purpose: the h1 leg must never upgrade to Go's
 	// own h2 - h2 belongs to the fhttp transport with the replayed fingerprint.
@@ -126,6 +177,26 @@ func (m *mimicRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return m.roundTripH1(req)
 }
 
+// errH2TTFBTimeout marks a chainedH2TTFBTimeout guard firing: the h2 mirror
+// leg accepted the stream but never delivered response headers [2026-10-14
+// 流级挂死修复].
+var errH2TTFBTimeout = errors.New("mimic: h2 leg time-to-first-header timeout")
+
+// classifyH2RoundTripErr maps an h2-leg RoundTrip error against the TTFB
+// guard state: (ttfbTimeout, clientCancel). Guard-fired cancels are the
+// guard's own doing (feed the latch); cancels with an un-fired guard are the
+// client giving up (navigation/tab close/browser timeout - never a leg
+// fault, must not feed the latch).
+func classifyH2RoundTripErr(err error, guardFired bool) (isTTFB, isClientCancel bool) {
+	if guardFired && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return true, false
+	}
+	if !guardFired && errors.Is(err, context.Canceled) {
+		return false, true
+	}
+	return false, false
+}
+
 // roundTripH2 re-originates an h2 client's request on the fhttp http2
 // transport whose fingerprint knobs were baked from this target's first
 // captured connection.
@@ -135,10 +206,45 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 		return m.roundTripH1(req)
 	}
 	t2 := m.h2TransportFor(addr, facts)
-	freq := toFhttpRequest(req, facts)
+	// [2026-10-14 流级挂死修复] TTFB guard: RoundTrip blocks until response
+	// headers arrive; an edge that takes the stream but never answers it
+	// (control plane alive, PINGs answered) used to hang here silently -
+	// the ping liveness passes and the failure latch only counts returned
+	// errors, so the request waited until the client gave up.
+	guardCtx, cancelGuard := context.WithCancel(req.Context())
+	var guardFired atomic.Bool
+	guardTimer := time.AfterFunc(chainedH2TTFBTimeout, func() {
+		guardFired.Store(true)
+		cancelGuard()
+	})
+	freq := toFhttpRequest(req.WithContext(guardCtx), facts)
 	resp, err := t2.RoundTrip(freq)
+	guardTimer.Stop()
+	_ = cancelGuard // deliberately not called on the success path: the body
+	// streams under guardCtx and canceling here would cut long transfers. No
+	// leak: the timer is stopped and guardCtx dies with req.Context().
 	if err == nil {
+		m.clearH2Failures(addr)
 		return fromFhttpResponse(resp, req), nil
+	}
+	isTTFB, isClientCancel := classifyH2RoundTripErr(err, guardFired.Load())
+	if isTTFB {
+		err = fmt.Errorf("%w: %s after %v without response headers", errH2TTFBTimeout, redacted.Redacted(addr), chainedH2TTFBTimeout)
+	}
+	if isClientCancel {
+		log.Printf("mimic: h2 leg roundtrip to %s canceled by client; not counted as an h2 failure", redacted.Redacted(addr))
+		return nil, err
+	}
+	if isTTFB {
+		// The stream stall is proven unrecoverable for this request: complete
+		// it on the h1 mirror leg right now (same handoff shape as the latch
+		// below) instead of erroring back to the browser, and feed the streak
+		// so repeated stalls pin the target to the h1 leg.
+		log.Printf("mimic: %s h2 leg %v; completing this request on the h1 mirror leg", redacted.Redacted(addr), err)
+		if m.recordH2Failure(addr) {
+			log.Printf("mimic: %s pinned to the h1 mirror leg after %d h2-leg failures (TTFB streak)", redacted.Redacted(addr), h2FailLatchThreshold)
+		}
+		return m.completeOnH1Handoff(req, facts, addr)
 	}
 	var alpnErr *alpnFallbackError
 	// 握手告警形态：对端 ALPN 配置与供给零交集时直接告警断连（连"无 ALPN 完成"
@@ -152,6 +258,21 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 	// 指纹的会话特征被其 BoringSSL 栈拒收。h1 镜像腿（同指纹仅 ALPN 对齐+原生 h1 会话）
 	// 对同一站全程无拒（旧版为证），故同样按可回退处理，而非 502+永久黑名单。
 	if !isAlpnFallbackShape(err, &alpnErr) {
+		// [2026-10-13 h2腿挂死修复] 非 ALPN 形态（拨号超时/RST/挂死/流级
+		// 错误）此前完全静默且永不回退：同一目标的后续请求会无限重入死路，
+		// 直到重启清池。改为：失败 loudly + 窗口内计数，达到阈值即闩上
+		// h1Only 并当场用实测可达的 h1 镜像腿完成本请求（req 的 ctx 已携带
+		// helloRaw，h1 腿可自行 fresh-spec 拨号）。误闩的代价是失去 h2 而
+		// 非失去可用性（h1 镜像腿对同主机实测 131ms 可达）。
+		if m.recordH2Failure(addr) {
+			log.Printf("mimic: %s pinned to the h1 mirror leg after %d h2-leg failures; last error: %v", redacted.Redacted(addr), h2FailLatchThreshold, err)
+			// 与 ALPN 回退同款 handoff 形态（2026-10-13 当晚 13 次实证可达）：
+			// 从 facts.helloRaw 显式提 h1 对齐 spec，不走依赖请求 ctx 携带
+			// helloRaw 的 freshSpecFrom——h2 入站路径的 ctx 只挂 connFactsKey
+			// （proxy.go:527），不保证有 mimicHelloKey。
+			return m.completeOnH1Handoff(req, facts, addr)
+		}
+		log.Printf("mimic: h2 leg roundtrip to %s failed: %v", redacted.Redacted(addr), err)
 		return nil, err
 	}
 	if alpnErr == nil {
@@ -235,7 +356,17 @@ func (m *mimicRoundTripper) h2TransportFor(addr string, facts *connFacts) *fhttp
 			if spec == nil {
 				return nil, fmt.Errorf("mimic: no usable mirrored hello for %s", redacted.Redacted(dialAddr))
 			}
-			conn, err := m.proxy.dialWithHello(context.Background(), network, dialAddr, m.stockTLSCfg(), spec)
+			// [2026-10-13 h2腿挂死修复] context.Background() 的拨号无界且
+			// 静默：边缘挂住镜像握手时该目标所有请求一起无限等待。改为有界
+			// 超时并 loudly 失败（错误返回由 roundTripH2 计数，阈值后闩到
+			// h1 镜像腿）。
+			ctx, cancel := context.WithTimeout(context.Background(), chainedH2DialTimeout)
+			defer cancel()
+			conn, err := m.proxy.dialWithHello(ctx, network, dialAddr, m.stockTLSCfg(), spec)
+			if err != nil {
+				log.Printf("mimic: h2 mirror dial to %s failed: %v", redacted.Redacted(dialAddr), err)
+				return nil, err
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -375,6 +506,63 @@ func (m *mimicRoundTripper) isH1Only(addr string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.h1Only[addr]
+}
+
+// recordH2Failure counts one h2-leg failure for addr and reports whether the
+// latch threshold is now reached (caller pins to h1Only and serves the request
+// on the h1 mirror leg). Failures older than h2FailLatchWindow reset the
+// streak first, so isolated client cancels never accumulate into a latch.
+// [2026-10-13 h2腿挂死修复] 实测形态：特定边缘对镜像 hello+h2 供给 RST 或黑洞
+// （www.alicdn.com 握手期 RST→502、caiyuanbao.alicdn.com 静默挂死零日志），
+// 而 markH1Only 原本只认 ALPN 告警形态，挂死/RST 形态永不触发，主机在重启前
+// 每次请求都重入死路。本闩锁把既有 "fall back honestly" 语义扩展到这些形态。
+func (m *mimicRoundTripper) recordH2Failure(addr string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.h2Fails[addr]
+	now := time.Now()
+	if st == nil || now.Sub(st.last) > h2FailLatchWindow {
+		st = &h2FailState{}
+	}
+	st.count++
+	st.last = now
+	if st.count >= h2FailLatchThreshold {
+		m.h1Only[addr] = true
+		delete(m.h2Fails, addr)
+		return true
+	}
+	m.h2Fails[addr] = st
+	return false
+}
+
+// clearH2Failures forgets a target's failure streak after a successful h2
+// roundtrip, so one blip between healthy requests never latches.
+func (m *mimicRoundTripper) clearH2Failures(addr string) {
+	m.mu.Lock()
+	delete(m.h2Fails, addr)
+	m.mu.Unlock()
+}
+
+// completeOnH1Handoff dials a fresh h1-aligned mirror connection from the
+// request's captured hello and serves the request on the h1 transport - the
+// shared "finish this request on the proven leg" shape used by the h2
+// failure latch and the TTFB guard [2026-10-14].
+func (m *mimicRoundTripper) completeOnH1Handoff(req *http.Request, facts *connFacts, addr string) (*http.Response, error) {
+	spec1 := extractMimicSpec(facts.helloRaw, false)
+	if spec1 == nil {
+		return nil, fmt.Errorf("mimic: no h1-aligned mirrored hello for %s", redacted.Redacted(addr))
+	}
+	conn1, derr := m.proxy.dialWithHello(req.Context(), "tcp", addr, m.stockTLSCfg(), spec1)
+	if derr != nil {
+		return nil, derr
+	}
+	handoffCtx1 := context.WithValue(req.Context(), dialHandoffKey{}, &dialHandoff{conn: conn1})
+	freq1 := toFhttpRequest(req.WithContext(handoffCtx1), facts)
+	resp1, err1 := m.h1t.RoundTrip(freq1)
+	if err1 != nil {
+		return nil, err1
+	}
+	return fromFhttpResponse(resp1, req), nil
 }
 
 func negotiatedProto(conn net.Conn) string {

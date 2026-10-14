@@ -22,9 +22,11 @@ type node[T Data] struct {
 	// leaf stores a possible leaf.
 	leaf []T
 
-	// prefixBase and prefixLen hold the node's common prefix. They replace
-	// a []token header so that the whole node fits the 64-byte size class.
-	prefixBase *token
+	// prefixBase and prefixLen hold the node's common prefix as PACKED bytes
+	// (2026-10-14 阶段1c 接线：1 字节/token，编码见 tokenize.go——packed 字节与
+	// token 一一对应且转义对不劈开). They replace a []token header so that the
+	// whole node fits the 64-byte size class.
+	prefixBase *byte
 	prefixLen  int
 
 	// edges stores child edges in sorted label order: literal-character
@@ -33,15 +35,15 @@ type node[T Data] struct {
 	edges []litEdge[T]
 }
 
-// prefixSlice reconstructs the node's prefix as a slice. It is O(1) and does
-// not copy.
-func (n *node[T]) prefixSlice() []token {
+// prefixSlice reconstructs the node's packed prefix as a byte slice. It is
+// O(1) and does not copy.
+func (n *node[T]) prefixSlice() []byte {
 	return unsafe.Slice(n.prefixBase, n.prefixLen)
 }
 
-// prefixBaseOf returns a pointer to the first token of s, or nil when s is
+// prefixBaseOf returns a pointer to the first byte of s, or nil when s is
 // empty.
-func prefixBaseOf(s []token) *token {
+func prefixBaseOf(s []byte) *byte {
 	if len(s) == 0 {
 		return nil
 	}
@@ -187,6 +189,7 @@ func (n *node[T]) traverse(url string) []T {
 
 	return t.data
 }
+
 // visit (2026-10-06) continues a SHARED traversal accumulator at child
 // node n: identical semantics to n.traverse(url) appended into t.data, but
 // without allocating a fresh traverser per sub-traversal.
@@ -205,7 +208,7 @@ func (t *traverser[T]) visit(n *node[T], url string) {
 			return
 		}
 		off := len(t.base) - len(url)
-		if pl := n.prefixSlice(); len(pl) == 1 && pl[0] == tokenWildcard {
+		if pl := n.prefixSlice(); len(pl) == 1 && pl[0] == packWildcard {
 			if mn, ok := t.tailMin[n]; ok && mn <= off {
 				return
 			}
@@ -218,8 +221,7 @@ func (t *traverser[T]) visit(n *node[T], url string) {
 	t.n = old
 }
 
-
-func (t *traverser[T]) traversePrefix(prefix []token, url string) {
+func (t *traverser[T]) traversePrefix(prefix []byte, url string) {
 	// 2026-10-08 P6 memo: every recursion state (node, remaining prefix
 	// length, url offset) is traversed at most once per call. The walk of a
 	// state is a pure function of the state, and a repeat's leaf insertions
@@ -249,12 +251,14 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 	// 2026-10-09 落地建议（eff_probe 沙箱原型验证）：连续字面量字节 token 改为循环内联消费。
 	// 与原 default 分支逐步递归（prefix[0]==token(url[0]) → 递归
 	// (prefix[1:], url[1:])）逐步等价：每轮做同一次比较并同步推进；
-	// 碰到特殊 token（>= tokenWildcard）或失配即停，剩余状态交给下方
-	// 原有分支。差异仅在于中间递归状态不再登记进 visited memo——少跳过
-	// 重复状态只会多做工作（重复走的 leaf 插入全部命中 dedup，累加器
-	// 首次出现序不变），不会改变任何输出；预算阀门（budgetOut）语义不变。
-	for len(prefix) > 0 && len(url) > 0 && prefix[0] < tokenWildcard {
-		if prefix[0] != token(url[0]) {
+	// 碰到特殊 token 或失配即停，剩余状态交给下方原有分支。差异仅在于
+	// 中间递归状态不再登记进 visited memo——少跳过重复状态只会多做工作
+	// （重复走的 leaf 插入全部命中 dedup，累加器首次出现序不变），不会
+	// 改变任何输出；预算阀门（budgetOut）语义不变。
+	// 2026-10-14 阶段1c：packed 字面量 0x00-0xF9 以自身字节编码、与 URL 字节
+	// 直接比较；0xFA-0xFF 字面量经 0xFE 转义对编码，由下方 default 分支处理。
+	for len(prefix) > 0 && len(url) > 0 && prefix[0] < packWildcard {
+		if prefix[0] != url[0] {
 			return
 		}
 		prefix = prefix[1:]
@@ -289,28 +293,44 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 		return
 	}
 	if len(url) == 0 {
-		if t.n.isLeaf() && len(prefix) == 1 && (prefix[0] == tokenAnchor || prefix[0] == tokenSeparator || prefix[0] == tokenWildcard) {
+		if t.n.isLeaf() && len(prefix) == 1 && (prefix[0] == packAnchor || prefix[0] == packSeparator || prefix[0] == packWildcard) {
 			t.appendLeaf()
 		}
 		return
 	}
 
 	switch prefix[0] {
-	case tokenWildcard:
+	case packWildcard:
 		if len(prefix) == 1 {
 			t.traverseWildcardTail(url)
 		} else {
 			switch prefix[1] {
-			case tokenAnchor:
+			case packAnchor:
 				t.traversePrefix(prefix[1:], "")
-			case tokenSeparator:
+			case packSeparator:
 				for i := 0; i < len(url); i++ {
 					if isSeparator(url[i]) {
 						t.traversePrefix(prefix[1:], url[i:])
 					}
 				}
+			case packEscape:
+				// prefix[1:] 以转义字面量开头（0xFE,x）：派发目标字节是 x，
+				// 命中后延续前缀仍是 prefix[1:]（含转义对，与 token 语义一致）。
+				if len(prefix) < 3 {
+					return
+				}
+				target := prefix[2]
+				off := 0
+				for off < len(url) {
+					idx := strings.IndexByte(url[off:], target)
+					if idx < 0 {
+						break
+					}
+					t.traversePrefix(prefix[1:], url[off+idx:])
+					off += idx + 1
+				}
 			default:
-				target := byte(prefix[1]) // #nosec G115 -- literal character tokens are always in ASCII byte range
+				target := prefix[1] // 0x00-0xF9 字面量在 packed 中以自身字节编码
 				off := 0
 				for off < len(url) {
 					idx := strings.IndexByte(url[off:], target)
@@ -322,7 +342,7 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 				}
 			}
 		}
-	case tokenSeparator:
+	case packSeparator:
 		if !isSeparator(url[0]) {
 			return
 		}
@@ -338,8 +358,14 @@ func (t *traverser[T]) traversePrefix(prefix []token, url string) {
 			t.traversePrefix(prefix[1:], url[i:])
 		}
 	default:
-		if prefix[0] == token(url[0]) {
-			t.traversePrefix(prefix[1:], url[1:])
+		// packed 后此分支只剩 packAnchor/packDomain/packEscape（0x00-0xF9 字面量
+		// 已被内联循环消费；packWildcard/packSeparator 命中上方 case）。
+		// packAnchor/packDomain 是结构 token，与任何 URL 字节都不匹配（token
+		// 世界同语义）；packEscape 按"下一字节为字面量"匹配并整对消费。
+		if prefix[0] == packEscape {
+			if len(prefix) > 1 && prefix[1] == url[0] {
+				t.traversePrefix(prefix[2:], url[1:])
+			}
 		}
 	}
 }

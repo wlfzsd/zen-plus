@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -666,6 +667,11 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 			writeUpstreamError(w, req, err)
 			return
 		}
+		if os.Getenv("ZEN_H1_DEBUG") == "1" {
+			log.Printf("[H1DBG] roundtrip ok: host=%s status=%d proto=%s CL=%q CE=%q TE=%v",
+				redacted.Redacted(req.URL.Host), resp.StatusCode, resp.Proto,
+				resp.Header.Get("Content-Length"), resp.Header.Get("Content-Encoding"), resp.TransferEncoding)
+		}
 		defer resp.Body.Close()
 
 		removeHopHeaders(resp.Header)
@@ -779,11 +785,47 @@ func writeResp(w http.ResponseWriter, resp *http.Response) {
 			rc := http.NewResponseController(w)
 			dst = &flushWriter{w: w, flush: rc.Flush}
 		}
-		_, err := io.Copy(dst, resp.Body)
+		// [2026-10-14 诊断插桩 ZEN_H1_DEBUG] body 中继失败的精确形态：
+		// 错误类型/已传字节/响应头关键约束（Content-Length vs 实际字节）——
+		// 定位 login.1688.com 主文档"头到 body 死"→ErrAbortHandler→RST 的
+		// body 死亡源头（源站空头 vs 隧道断 vs 解码层）。
+		var copied int64 = -1
+		var copyErr error
+		if os.Getenv("ZEN_H1_DEBUG") == "1" {
+			copied, copyErr = io.Copy(dst, resp.Body)
+		} else {
+			copied, copyErr = io.Copy(dst, resp.Body)
+		}
+		_ = copied
 		// Close the body before reading trailers;
 		// resp.Trailer is only populated after the body is fully consumed and closed.
 		resp.Body.Close()
-		if err != nil {
+		if copyErr != nil {
+			// [2026-10-14 302取消竞态修复] 客户端已放弃该流时静默收场，不再
+			// panic(ErrAbortHandler)：Chrome 对 302 的标准行为是收头即走、不读
+			// body（RST_STREAM/停读），此时 req ctx 已取消，读源站 body 必然
+			// 报错——而 ErrAbortHandler 会掐死整条入站 h2 连接，连带 RST 同
+			// 连接上的主文档流与后续跳转 → 浏览器 ERR_HTTP2_PROTOCOL_ERROR
+			//（login.1688.com 302 跳转链 6/6 复现，netlog stream RST 实锤，
+			// 2026-10-13 旧版同样存在——非当日 TTFB 修复引入）。仅当客户端
+			// 仍在线（ctx 未取消）时才认定真上游故障，维持既有 abort 语义。
+			if resp.Request == nil || resp.Request.Context().Err() != nil {
+				if os.Getenv("ZEN_H1_DEBUG") == "1" {
+					log.Printf("[H1DBG] relay body aborted by client (ctx=%v); returning quietly instead of ErrAbortHandler | copied=%d | err=%v",
+						resp.Request.Context().Err(), copied, copyErr)
+				}
+				return
+			}
+			if os.Getenv("ZEN_H1_DEBUG") == "1" {
+				cl := resp.Header.Get("Content-Length")
+				ce := resp.Header.Get("Content-Encoding")
+				host := ""
+				if resp.Request != nil && resp.Request.URL != nil {
+					host = redacted.Redacted(resp.Request.URL.Host)
+				}
+				log.Printf("[H1DBG] relay body copy error: %v | copied=%d | CL=%q CE=%q TE=%q host=%s",
+					copyErr, copied, cl, ce, resp.TransferEncoding, host)
+			}
 			panic(http.ErrAbortHandler)
 		}
 	}

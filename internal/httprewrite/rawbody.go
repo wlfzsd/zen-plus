@@ -142,8 +142,17 @@ func getRawBodyReader(res *http.Response) (body io.ReadCloser, mimeType string, 
 
 	decodedReader, err := charset.NewReader(decompressedReader, contentType)
 	if err != nil {
-		decompressedReader.Close()
-		return nil, "", fmt.Errorf("create decoded reader for content type %q: %v", contentType, err)
+		// [2026-10-14 空body解码失败修复] charset 检测器需要预读 body 嗅探
+		// 编码；body 为空/立即 EOF（1688 风控对部分会话发"头到 body 死"响应，
+		// 2026-10-14 login.1688.com 实弹 6/6）时这里返回 EOF 错误。原实现在此
+		// Close decompressedReader——encoding=="" 时它就是 res.Body 本身——
+		// 把原始响应 body 关掉了；调用方 HandleResponse 是"记日志继续转发"
+		// 语义，随后 writeResp 读已关闭的 body → http2 errClosedResponseBody
+		// → panic(ErrAbortHandler) → 整条入站 h2 连接被掐 → 浏览器
+		// ERR_HTTP2_PROTOCOL_ERROR。修法：解码失败降级为"原文直通"——保留
+		// body 可读（未解码原文交给调用方，注入器在原字节上自行决策），body
+		// 永远存活，连接与请求照常完成。
+		return res.Body, mimeType, nil
 	}
 
 	return struct {
