@@ -1,0 +1,128 @@
+.settings-manager {
+  margin: 0.25rem 0 0.5rem 0;
+}
+
+.settings-manager__section-header {
+  border-radius: 0 !important;
+  font-weight: bold;
+}
+
+.settings-manager__section--app {
+  border: 1px solid #245ac7;
+  border-radius: var(--bp-surface-border-radius);
+  margin-bottom: 8px;
+}
+
+.settings-manager__section--links {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.settings-manager__section--advanced {
+  border: 1px solid #fbb360;
+  border-radius: var(--bp-surface-border-radius);
+  margin-bottom: 4px;
+}
+
+.settings-manager__ignored-hosts-input {
+  width: 100% !important;
+  max-height: 40vh;
+}
+
+.settings-manager__ignored-hosts-tooltip {
+  width: 100%;
+}
+
+.settings-manager__app-routing {
+  width: 100%;
+}
+
+.settings-manager__app-routing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.settings-manager__app-routing-warning {
+  margin-bottom: 8px;
+}
+
+.settings-manager__app-routing-app {
+  align-items: center;
+  border: var(--bp-surface-border-width) solid var(--bp-surface-border-color-strong);
+  border-radius: var(--bp-surface-border-radius);
+  display: grid;
+  gap: 2px 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 6px 8px;
+}
+
+.settings-manager__app-routing-app-name,
+.settings-manager__app-routing-app-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-manager__app-routing-app-name {
+  font-weight: 600;
+}
+
+.settings-manager__app-routing-app-path {
+  font-size: 0.75rem;
+}
+
+.settings-manager__app-routing-app .bp6-button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+}
+
+.settings-manager__upstream-proxy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.settings-manager__upstream-proxy-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-manager__upstream-proxy-row .bp6-html-select {
+  flex: 0 0 auto;
+}
+
+.settings-manager__upstream-proxy-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-manager__upstream-proxy-port {
+  flex: 0 0 5.5rem;
+}
+
+.settings-manager__upstream-proxy-row .bp6-input-group {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.settings-manager__section-body {
+  padding: 10px 10px 0 10px;
+}
+
+.settings-manager__about {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+.settings-manager__about-changelog::before {
+  content: ' ';
+}
+
+.settings-manager__about-github-button {
+  font-size: 0.8rem;
+}

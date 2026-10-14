@@ -1,0 +1,34 @@
+#app {
+  height: 100vh;
+  width: 100vw;
+  background-color: #f5f8fa;
+  color: #000;
+  display: flex;
+  flex-direction: column;
+}
+
+#app.bp6-dark {
+  background: rgb(47, 52, 60);
+  color: #fff;
+}
+
+/* Light theme version of logo */
+#app:not(.bp6-dark) .heading__logo svg {
+  stroke: #394b59;
+}
+
+.tabs {
+  padding: 0 12px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.content {
+  overflow-y: auto;
+  padding: 0 12px;
+  flex-grow: 1;
+}
+
+.tabs .bp6-button {
+  border-radius: 0;
+}

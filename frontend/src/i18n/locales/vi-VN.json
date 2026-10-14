@@ -1,0 +1,200 @@
+{
+  "app": {
+    "proxy": {
+      "description": "Proxy không hoạt động. Nhấp vào nút bên dưới để bật.",
+      "inactive": "Bật proxy để xem các yêu cầu bị chặn"
+    },
+    "tabs": {
+      "filterLists": "Danh sách bộ lọc",
+      "home": "Trang chủ",
+      "rules": "Quy tắc",
+      "settings": "Cài đặt"
+    },
+    "update": {
+      "restart": "Khởi động lại",
+      "restartFailed": "Không thể khởi động lại ứng dụng: {{error}}",
+      "restarting": "Đang khởi động lại...",
+      "updateAvailable": "Đã có phiên bản Zen mới."
+    }
+  },
+  "appRoutingSettings": {
+    "addApp": "Thêm ứng dụng",
+    "allowlistMode": "Chỉ bật proxy cho ứng dụng được chọn",
+    "blocklistMode": "Bật proxy cho mọi ứng dụng trừ các ứng dụng được chọn",
+    "description": "Chọn các ứng dụng sử dụng proxy của Zen.",
+    "emptyAllowlistWarning": "Chưa chọn ứng dụng nào. Toàn bộ lưu lượng sẽ bỏ qua Zen.",
+    "label": "Định tuyến ứng dụng",
+    "removeApp": "Xóa ứng dụng",
+    "saveError": "Không thể lưu cài đặt định tuyến ứng dụng: {{error}}",
+    "selectError": "Không thể chọn ứng dụng: {{error}}"
+  },
+  "autoStartSwitch": {
+    "description": "Tự động chạy Zen khi bạn đăng nhập",
+    "disableError": "Không thể tắt tính năng tự khởi động: {{error}}",
+    "enableError": "Không thể bật tính năng tự khởi động: {{error}}",
+    "label": "Tự khởi động"
+  },
+  "common": {
+    "stopProxyToAddFilter": "Dừng proxy để thêm danh sách bộ lọc mới",
+    "stopProxyToDeleteFilter": "Dừng proxy để xóa danh sách bộ lọc này",
+    "stopProxyToEditRules": "Dừng proxy để chỉnh sửa quy tắc tùy chỉnh",
+    "stopProxyToModify": "Dừng proxy để thay đổi cài đặt này",
+    "stopProxyToToggleFilter": "Dừng proxy để bật/tắt danh sách bộ lọc này"
+  },
+  "createFilterList": {
+    "addError": "Không thể thêm danh sách bộ lọc: {{error}}",
+    "addList": "Thêm danh sách bộ lọc",
+    "trustedListsWarning": "Các danh sách đáng tin cậy có thể sử dụng khả năng chặn mạnh mẽ như đoạn mã <code>trusted-</code> và quy tắc JavaScript nhưng <strong>có thể gây gián đoạn quyền riêng tư và bảo mật</strong> nếu bị bên độc hại chiếm đoạt. Chỉ bật tùy chọn này cho danh sách từ nguồn bạn tin cậy."
+  },
+  "donate": "Ủng hộ",
+  "exportDebugDataButton": {
+    "error": "Không thể xuất dữ liệu gỡ lỗi: {{error}}",
+    "label": "Xuất dữ liệu gỡ lỗi",
+    "success": "Đã sao chép dữ liệu gỡ lỗi vào bộ nhớ tạm",
+    "tooltip": "Sao chép thông tin gỡ lỗi vào bộ nhớ tạm"
+  },
+  "exportFilterList": {
+    "errorMessage": "Không thể xuất danh sách bộ lọc: {{error}}",
+    "export": "Xuất",
+    "successMessage": "Đã xuất danh sách bộ lọc tùy chỉnh thành công"
+  },
+  "exportLogsButton": {
+    "label": "Xuất nhật ký",
+    "openError": "Không thể mở thư mục nhật ký: {{error}}",
+    "tooltip": "Mở thư mục nhật ký"
+  },
+  "filterLists": {
+    "copied": "Đã sao chép",
+    "copy": "Sao chép liên kết",
+    "delete": "Xóa",
+    "goTo": "Mở trong trình duyệt",
+    "more": "Thêm",
+    "removeError": "Không thể xóa danh sách bộ lọc: {{error}}",
+    "toggleError": "Không thể chuyển đổi danh sách bộ lọc: {{error}}",
+    "trusted": "Đáng tin cậy",
+    "whatIsThis": "Đây là gì"
+  },
+  "filterTypes": {
+    "ads": "Quảng cáo",
+    "custom": "Tùy chỉnh",
+    "digitalWellbeing": "Sức khỏe số",
+    "general": "Chung",
+    "malware": "Mã độc",
+    "privacy": "Quyền riêng tư",
+    "regional": "Theo khu vực"
+  },
+  "ignoredHostsInput": {
+    "description": "Các máy chủ cần loại khỏi proxy. Dùng cho dịch vụ có ghim chứng chỉ hoặc bị ảnh hưởng bởi proxy.",
+    "helper": "Nhập một máy chủ trên mỗi dòng.",
+    "label": "Máy chủ bị bỏ qua"
+  },
+  "importFilterList": {
+    "errorMessage": "Không thể nhập danh sách bộ lọc: {{error}}",
+    "import": "Nhập",
+    "successMessage": "Đã nhập danh sách bộ lọc tùy chỉnh thành công"
+  },
+  "intro": {
+    "buttons": {
+      "next": "Tiếp theo",
+      "skip": "Bỏ qua giới thiệu"
+    },
+    "connect": {
+      "caNote": "Khi khởi động lần đầu, Zen có thể yêu cầu cài chứng chỉ gốc CA cục bộ. Điều này giúp lọc HTTPS để Zen chặn quảng cáo và trình theo dõi trên mọi trang web. Mọi thứ xử lý cục bộ – <strong>không có dữ liệu nào rời khỏi thiết bị của bạn</strong>.<br />Xem GitHub của chúng tôi để biết chi tiết kỹ thuật.",
+      "description": "Bạn đã sẵn sàng. Nhấn \"Bắt đầu\" để bật tính năng bảo vệ mạng toàn diện của Zen.",
+      "donateText": "Và cân nhắc ủng hộ tại:",
+      "socialText": "Nếu muốn, hãy ghé thăm mạng xã hội của chúng tôi:",
+      "title": "Đã xong!"
+    },
+    "filterLists": {
+      "description": "Để bật tính năng chặn quảng cáo và bảo vệ quyền riêng tư, Zen sử dụng <strong>danh sách bộ lọc</strong>. Bạn cũng có thể thiết lập chúng sau trong ứng dụng.",
+      "recommendation": "Dựa trên khu vực của bạn, chúng tôi khuyên dùng các danh sách bộ lọc sau:",
+      "title": "Danh sách bộ lọc"
+    },
+    "settings": {
+      "description": "Xem lại các cài đặt bên dưới:",
+      "settingsNote": "Bạn cũng có thể thay đổi các cài đặt này bất cứ lúc nào trong ứng dụng.",
+      "title": "Cài đặt"
+    },
+    "welcome": {
+      "description": "Chọn ngôn ngữ của bạn:",
+      "title": "Chào mừng đến với Zen!"
+    }
+  },
+  "pacPortInput": {
+    "description": "Cổng máy chủ PAC (tự động cấu hình proxy) sẽ lắng nghe (0 để chọn ngẫu nhiên).",
+    "helper": "Sử dụng cổng dưới 1024 có thể yêu cầu quyền quản trị.",
+    "label": "Cổng máy chủ PAC",
+    "setError": "Không thể đặt cổng máy chủ PAC: {{error}}"
+  },
+  "portInput": {
+    "description": "Cổng máy chủ proxy sẽ lắng nghe (0 để chọn ngẫu nhiên).",
+    "helper": "Sử dụng cổng dưới 1024 có thể yêu cầu quyền quản trị.",
+    "label": "Cổng proxy"
+  },
+  "requestLog": {
+    "emptyState": "Bắt đầu duyệt web để xem các yêu cầu bị chặn.",
+    "filterName": "Tên bộ lọc",
+    "method": "Phương thức",
+    "process": "Tiến trình",
+    "processName": "Tên",
+    "processPath": "Đường dẫn",
+    "redirectedTo": "Đã chuyển hướng đến",
+    "referer": "Trang giới thiệu",
+    "request": "Yêu cầu",
+    "rule": "Quy tắc",
+    "rules": "Quy tắc",
+    "url": "URL"
+  },
+  "rules": {
+    "help": "Trợ giúp",
+    "placeholder": "Thêm quy tắc tùy chỉnh của bạn vào đây..."
+  },
+  "settings": {
+    "about": {
+      "changelog": "nhật ký thay đổi",
+      "tagline": "Trình chặn quảng cáo và bảo vệ quyền riêng tư toàn diện của bạn",
+      "version": "Phiên bản"
+    },
+    "ca": {
+      "confirmTitle": "Bạn có chắc chắn muốn gỡ cài đặt chứng chỉ CA không?",
+      "errorMessage": "Không thể gỡ cài đặt CA: {{error}}",
+      "reasons": {
+        "malfunctioning": "Bạn nghi ngờ việc cài đặt CA bị lỗi. Sự cố này có thể xuất hiện dưới dạng lỗi trình duyệt khi truy cập trang web HTTPS, hoặc ứng dụng khác không thể kết nối internet.",
+        "uninstall": "Bạn muốn gỡ cài đặt hoàn toàn Zen."
+      },
+      "reinstallInfo": "Nếu bạn khởi động lại Zen, chứng chỉ CA mới sẽ được cài đặt.",
+      "stopProxyTooltip": "Dừng proxy để gỡ cài đặt CA",
+      "successMessage": "Đã gỡ cài đặt CA thành công",
+      "uninstallButton": "Gỡ cài đặt CA",
+      "uninstallConfirm": "Gỡ cài đặt",
+      "usefulIf": "Điều này hữu ích nếu"
+    },
+    "language": {
+      "helper": "Chọn ngôn ngữ ưu tiên của bạn",
+      "label": "Ngôn ngữ"
+    },
+    "sections": {
+      "advanced": "Nâng cao",
+      "app": "Ứng dụng"
+    },
+    "theme": {
+      "chooseTheme": "Chọn giao diện",
+      "dark": "Tối",
+      "light": "Sáng",
+      "system": "Theo giao diện hệ thống"
+    },
+    "updates": {
+      "automaticUpdates": "Tự động tải xuống bản cập nhật",
+      "description": "Khi bật, Zen sẽ tự động kiểm tra bản cập nhật",
+      "disableError": "Không thể tắt cập nhật tự động: {{error}}",
+      "enableError": "Không thể bật cập nhật tự động: {{error}}"
+    }
+  },
+  "startStopButton": {
+    "start": "Bắt đầu",
+    "startError": "Không thể khởi động proxy: {{error}}",
+    "stop": "Dừng",
+    "stopError": "Không thể dừng proxy: {{error}}",
+    "unsupportedDEGuide": "Tính năng tự động cấu hình proxy hệ thống hiện chỉ được hỗ trợ trên GNOME và KDE.<br />Vui lòng làm theo <guide-link>hướng dẫn này</guide-link> để thiết lập proxy cho từng ứng dụng."
+  }
+}

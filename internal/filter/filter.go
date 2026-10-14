@@ -1,0 +1,632 @@
+package filter
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"hash/maphash"
+	"io"
+	"log"
+	"mime"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+
+	"github.com/irbis-sh/zen-desktop/internal/exemption"
+	"github.com/irbis-sh/zen-desktop/internal/fetchmeta"
+	"github.com/irbis-sh/zen-desktop/internal/filterliststore"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
+	"github.com/irbis-sh/zen-desktop/internal/process"
+	"github.com/irbis-sh/zen-desktop/internal/redacted"
+	"github.com/irbis-sh/zen-desktop/internal/taplog"
+)
+
+// filterActionObserver observes filter events.
+type filterActionObserver interface {
+	OnFilterBlock(method, url, referer string, rules []rule.Rule, processInfo process.Info)
+	OnFilterRedirect(method, url, to, referer string, rules []rule.Rule, processInfo process.Info)
+	OnFilterModify(method, url, referer string, rules []rule.Rule, processInfo process.Info)
+}
+
+type filterListStore interface {
+	Get(ctx context.Context, url string, mode filterliststore.FetchMode) (io.ReadCloser, filterliststore.Source, error)
+}
+
+type networkRules interface {
+	ParseRule(rule string, filterName *string) (isException bool, err error)
+	ModifyReq(req *http.Request) (appliedRules []rule.Rule, shouldBlock bool, redirectURL string)
+	ModifyRes(req *http.Request, res *http.Response) ([]rule.Rule, error)
+	// ActiveExceptions resolves the exception-modifier exemptions for a
+	// document request ($elemhide/$generichide/$specifichide/$jsinject and
+	// the cosmetic/js components of $document). 2026-10-08 (B2).
+	ActiveExceptions(req *http.Request) exemption.Exemption
+	CreateBlockResponse(req *http.Request) *http.Response
+	CreateRedirectResponse(req *http.Request, to string) *http.Response
+	CreateBlockPageResponse(req *http.Request, appliedRules []rule.Rule, whitelistPort int) (*http.Response, error)
+	Compact()
+}
+
+// documentInjector handles non-network rules and HTML injection.
+type documentInjector interface {
+	AddRule(rule string, filterListTrusted bool) (handled bool, err error)
+	// 2026-10-08 (B2): Inject accepts the exception-modifier exemptions
+	// resolved by NetworkRules.ActiveExceptions (zero value = no exemption,
+	// pre-B2 behavior).
+	Inject(*http.Request, *http.Response, ...exemption.Exemption) error
+}
+
+type whitelistSrv interface {
+	GetPort() int
+}
+
+// Filter is capable of parsing Adblock-style filter lists and hosts rules and matching URLs against them.
+//
+// Safe for concurrent use.
+type Filter struct {
+	networkRules    networkRules
+	injector        documentInjector
+	filterListStore filterListStore
+	actionObserver  filterActionObserver
+	whitelistSrv    whitelistSrv
+
+	// seenRules holds hashes of the network rules parsed so far, so a rule
+	// supplied by several lists (AdGuard Base embeds EasyList) is parsed and
+	// stored once. Finalize sets it to nil, which frees it and turns dedupe
+	// off. seenMu guards it because lists load on parallel goroutines.
+	seenMu    sync.Mutex
+	seenSeed  maphash.Seed
+	seenRules map[uint64]struct{}
+}
+
+var (
+	// ignoreLineRegex matches comments and [Adblock Plus 2.0]-style headers.
+	ignoreLineRegex = regexp.MustCompile(`^(?:!|\[|#[^#%@$])`)
+)
+
+// NewFilter creates and initializes a new filter.
+func NewFilter(networkRules networkRules, injector documentInjector, filterListStore filterListStore, actionObserver filterActionObserver, whitelistSrv whitelistSrv) (*Filter, error) {
+	if actionObserver == nil {
+		return nil, errors.New("actionObserver is nil")
+	}
+	if networkRules == nil {
+		return nil, errors.New("networkRules is nil")
+	}
+	if injector == nil {
+		return nil, errors.New("injector is nil")
+	}
+	if filterListStore == nil {
+		return nil, errors.New("filterListStore is nil")
+	}
+	if whitelistSrv == nil {
+		return nil, errors.New("whitelistSrv is nil")
+	}
+
+	f := &Filter{
+		networkRules:    networkRules,
+		injector:        injector,
+		actionObserver:  actionObserver,
+		whitelistSrv:    whitelistSrv,
+		filterListStore: filterListStore,
+		seenSeed:        maphash.MakeSeed(),
+		seenRules:       make(map[uint64]struct{}),
+	}
+
+	return f, nil
+}
+
+const includeMaxDepth = 20
+
+// maxRuleLength caps the scanner's token size when parsing filter lists.
+// Real rules top out in the tens of KB (scriptlet injections with inlined
+// code); a line past 1 MiB is malformed content, not a rule.
+const maxRuleLength = 1 << 20
+
+// Outcome reports how adding a filter list went. The zero value means every
+// stream was fetched and parsed to EOF.
+type Outcome struct {
+	// Truncated reports that the root list or one of its includes broke
+	// mid-body: the filter holds the rules that arrived before the break,
+	// so the list is partially applied. Refetching may succeed.
+	Truncated bool
+
+	// Failed reports that a stream could not be obtained at all. When it is
+	// the root list, no rules were applied; when it is an include, the rest
+	// of the list is applied without that include's rules.
+	Failed bool
+
+	// ServedStale reports that at least one stream was served from an
+	// expired cache copy.
+	ServedStale bool
+
+	// Err carries the failures behind the flags, aggregated across streams.
+	Err error
+}
+
+// Merge combines two outcomes: flags are ORed, errors accumulated.
+func (o Outcome) Merge(other Outcome) Outcome {
+	return Outcome{
+		Truncated:   o.Truncated || other.Truncated,
+		Failed:      o.Failed || other.Failed,
+		ServedStale: o.ServedStale || other.ServedStale,
+		Err:         errors.Join(o.Err, other.Err),
+	}
+}
+
+// AddURL fetches a filter list from a URL, expands !#include directives, and adds rules to the filter.
+// ctx and mode are threaded to every fetch, includes included.
+func (f *Filter) AddURL(ctx context.Context, listURL string, listName string, listTrusted bool, mode filterliststore.FetchMode) Outcome {
+	if listURL == "" {
+		return Outcome{Failed: true, Err: errors.New("url is empty")}
+	}
+
+	var ruleCount, exceptionCount int
+	var countsMu sync.Mutex
+	var parseFailures int
+
+	addRuleLine := func(line string) {
+		if len(line) == 0 || ignoreLineRegex.MatchString(line) {
+			return
+		}
+		if isException, err := f.addRule(line, &listName, listTrusted); err != nil { // nolint:revive
+			parseFailures++ // 2026-10-08 可观测性: parse 失败的规则曾被静默丢弃（引号联合 jsonprune 即此命运）
+		} else {
+			countsMu.Lock()
+			if isException {
+				exceptionCount++
+			} else {
+				ruleCount++
+			}
+			countsMu.Unlock()
+		}
+	}
+
+	visited := make(map[string]struct{})
+	var visitedMu sync.Mutex
+
+	// Every stream's outcome funnels into one collector: parseURL goroutines
+	// never wait on each other (see the include invariant below), so a
+	// mutex-guarded merge is the only join point besides the WaitGroup.
+	var outcome Outcome
+	var outcomeMu sync.Mutex
+	record := func(o Outcome) {
+		outcomeMu.Lock()
+		outcome = outcome.Merge(o)
+		outcomeMu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	var parseURL func(currentURL string, depth int)
+
+	parseURL = func(currentURL string, depth int) {
+		defer wg.Done()
+		if depth > includeMaxDepth {
+			log.Printf("filter: max depth %d exceeded when adding %q", includeMaxDepth, currentURL)
+			record(Outcome{Failed: true, Err: fmt.Errorf("max include depth %d exceeded at %q", includeMaxDepth, currentURL)})
+			return
+		}
+
+		base, err := url.Parse(currentURL)
+		if err != nil {
+			log.Printf("filter: error parsing url %q: %v", currentURL, err)
+			record(Outcome{Failed: true, Err: fmt.Errorf("parse url %q: %w", currentURL, err)})
+			return
+		}
+
+		visitedMu.Lock()
+		if _, ok := visited[currentURL]; ok {
+			visitedMu.Unlock()
+			// Deduplication, not a loss: the first fetch supplies the rules,
+			// so nothing is recorded in the outcome.
+			log.Printf("filter: duplicate include %q skipped", currentURL)
+			return
+		}
+		visited[currentURL] = struct{}{}
+		visitedMu.Unlock()
+
+		contents, src, err := f.filterListStore.Get(ctx, currentURL, mode)
+		if err != nil {
+			log.Printf("failed to get filter list %q from store: %v", currentURL, err)
+			record(Outcome{Failed: true, Err: fmt.Errorf("get %q: %w", currentURL, err)})
+			return
+		}
+		defer contents.Close()
+		if src == filterliststore.SourceStaleCache {
+			record(Outcome{ServedStale: true})
+		}
+
+		// Each stream tracks its own !#if blocks: includes are parsed on
+		// their own goroutines, so shared state would depend on scheduling.
+		// A block therefore can't span files.
+		var dirs directives
+		scanner := bufio.NewScanner(contents)
+		scanner.Buffer(nil, maxRuleLength)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			// Before the !#include branch: an include in a false block must
+			// not be fetched.
+			skip, err := dirs.skip(line)
+			if err != nil {
+				log.Printf("filter: treating malformed !#if as false in %s (%q): %v", listName, currentURL, err)
+			}
+			if skip {
+				continue
+			}
+			if after, ok := strings.CutPrefix(line, "!#include"); ok {
+				includeURL, err := resolveInclude(base, after)
+				if err != nil {
+					log.Printf("filter: error resolving include: %v", err)
+					record(Outcome{Failed: true, Err: fmt.Errorf("resolve include in %q: %w", currentURL, err)})
+					continue
+				}
+
+				// Includes are parsed on their own goroutines and never
+				// awaited here: this goroutine still holds its list's fetch
+				// slot until the reader hits EOF or is closed, so blocking on
+				// a descendant that may be queued for a slot would deadlock at
+				// low fetch concurrency. The top-level WaitGroup is the only
+				// join point.
+				wg.Add(1)
+				go parseURL(includeURL, depth+1)
+				continue
+			}
+
+			addRuleLine(line)
+		}
+		if err := scanner.Err(); err != nil {
+			switch {
+			case errors.Is(err, bufio.ErrTooLong):
+				// Parser-side and deterministic: a refetch would hit the same
+				// oversized line again, so this must not read as truncation.
+				log.Printf("filter: %q contains a line over %d bytes, skipping the rest of the list", currentURL, maxRuleLength)
+				// Drain to a verified EOF so the download still gets cached:
+				// abandoning here would refetch the list in full at every
+				// startup and leave it with no offline copy. The store bounds
+				// the drain with its size cap and stall watchdog; if it
+				// breaks, the list is simply not cached, as before.
+				_, _ = io.Copy(io.Discard, contents)
+			case errors.Is(err, filterliststore.ErrEmptyBody):
+				// A property of the response, not a broken stream: zero rules
+				// were contributed, so there is nothing a rebuild could purge,
+				// and a refetch would deliver the same emptiness.
+				log.Printf("filter: %q served an empty body", currentURL)
+				record(Outcome{Failed: true, Err: fmt.Errorf("read %q: %w", currentURL, err)})
+			case errors.Is(err, filterliststore.ErrListTooLarge):
+				// Deterministic like bufio.ErrTooLong: the rules up to the
+				// size cap were applied and a refetch would break at the same
+				// byte, so this must not read as truncation either.
+				log.Printf("filter: %q exceeds the list size cap, skipping the rest of the list", currentURL)
+			default:
+				// Anything else came from the store's reader: the stream
+				// broke mid-body and the rules parsed so far are an
+				// incomplete list.
+				log.Printf("filter: error scanning %q: %v", currentURL, err)
+				record(Outcome{Truncated: true, Err: fmt.Errorf("read %q: %w", currentURL, err)})
+			}
+		} else if n := dirs.open(); n > 0 {
+			// A false one hid every line after it, which would otherwise show
+			// only as a low rule count.
+			log.Printf("filter: %d !#if blocks left open in %s (%q)", n, listName, currentURL)
+		}
+	}
+
+	wg.Add(1)
+	go parseURL(listURL, 0)
+	wg.Wait()
+
+	log.Printf("filter: added %d rules, %d exceptions from %s", ruleCount, exceptionCount, listName)
+	if parseFailures > 0 {
+		log.Printf("filter: %d rules from %s failed to parse and were skipped", parseFailures, listName)
+	}
+	return outcome
+}
+
+// AddReader parses the rules from the given reader and adds them to the filter.
+func (f *Filter) AddReader(listRules io.Reader, listName string, listTrusted bool) error {
+	var ruleCount, exceptionCount int
+	var failureCount int
+	var firstFailures []string
+	var dirs directives
+	scanner := bufio.NewScanner(listRules)
+	scanner.Buffer(nil, maxRuleLength)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		skip, err := dirs.skip(line)
+		if err != nil {
+			log.Printf("filter: treating malformed !#if as false in %s: %v", listName, err)
+		}
+		if skip || len(line) == 0 || ignoreLineRegex.MatchString(line) {
+			continue
+		}
+
+		if isException, err := f.addRule(line, &listName, listTrusted); err != nil { // nolint:revive
+			// myRules 路径可观测性（2026-10-13）：此前解析失败被完全静默，
+			// 用户自定义规则写错时无任何痕迹。记录计数与首几条样例。
+			failureCount++
+			if len(firstFailures) < 5 {
+				firstFailures = append(firstFailures, line)
+			}
+		} else if isException {
+			exceptionCount++
+		} else {
+			ruleCount++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if n := dirs.open(); n > 0 {
+		log.Printf("filter: %d !#if blocks left open in %s", n, listName)
+	}
+
+	if failureCount > 0 {
+		log.Printf("filter: %d rules from %s failed to parse and were skipped; samples: %s",
+			failureCount, listName, strings.Join(firstFailures, " | "))
+	}
+	log.Printf("filter: added %d rules, %d exceptions from %s", ruleCount, exceptionCount, listName)
+	return nil
+}
+
+// addRule adds a new rule to the filter.
+func (f *Filter) addRule(rule string, filterListName *string, filterListTrusted bool) (isException bool, err error) {
+	if handled, err := f.injector.AddRule(rule, filterListTrusted); err != nil {
+		return false, err
+	} else if handled {
+		return false, nil
+	}
+
+	// Dedupe only after the injector declines the line: network rules ignore
+	// list trust, but the injector uses it to decide whether scriptlets run.
+	// The first list to supply a rule keeps it, so the request log names that
+	// list, and which one comes first varies between builds.
+	if f.markSeen(rule) {
+		return false, nil
+	}
+
+	isExceptionRule, err := f.networkRules.ParseRule(rule, filterListName)
+	if err != nil {
+		return false, fmt.Errorf("parse network rule: %w", err)
+	}
+	return isExceptionRule, nil
+}
+
+// markSeen records a network rule and reports whether it was recorded before.
+//
+// Only the 64-bit hash is stored, so a collision silently drops a rule. At
+// ~700k lines the odds are about n^2/2^65, 1 in 75 million per build.
+func (f *Filter) markSeen(rule string) bool {
+	key := maphash.String(f.seenSeed, rule)
+
+	f.seenMu.Lock()
+	defer f.seenMu.Unlock()
+	if f.seenRules == nil {
+		return false
+	}
+	if _, ok := f.seenRules[key]; ok {
+		return true
+	}
+	f.seenRules[key] = struct{}{}
+	return false
+}
+
+// HandleRequest handles the given request by matching it against the filter rules.
+// If the request should be blocked, it returns a response that blocks the request. If the request should be modified, it modifies it in-place.
+func (f *Filter) HandleRequest(req *http.Request, processInfo process.Info) (*http.Response, error) {
+	// initialURL 只在过滤事件分支需要；事件是少数路径，通用请求不为它付
+	// URL.String() 的分配（2026-10-07 效率审计）。ModifyReq 不替换 req.URL
+	// 指针（全仓无 req.URL= 赋值），指针先行捕获即可保住"事件前"的语义。
+	initialURL := req.URL
+
+	appliedRules, shouldBlock, redirectURL := f.networkRules.ModifyReq(req)
+	if shouldBlock {
+		f.actionObserver.OnFilterBlock(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		// reqLogFields builds maps and URL strings for every call; gate it
+		// so the disabled diagnostic tap costs a single Enabled() check
+		// instead of per-request allocations (2026-10-13).
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("block", req, initialURL, appliedRules, processInfo))
+		}
+
+		if fetchmeta.IsUserNavigation(req) {
+			port := f.whitelistSrv.GetPort()
+			if port <= 0 {
+				log.Printf("whitelist server not ready, falling back to simple block response for %q", redacted.Redacted(req.URL))
+				return f.networkRules.CreateBlockResponse(req), nil
+			}
+
+			res, err := f.networkRules.CreateBlockPageResponse(req, appliedRules, f.whitelistSrv.GetPort())
+			if err != nil {
+				return nil, fmt.Errorf("create block page response: %v", err)
+			}
+			return res, nil
+		}
+		return f.networkRules.CreateBlockResponse(req), nil
+	}
+
+	if redirectURL != "" {
+		f.actionObserver.OnFilterRedirect(req.Method, initialURL.String(), redirectURL, req.Header.Get("Referer"), appliedRules, processInfo)
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("redirect", req, initialURL, appliedRules, processInfo))
+		}
+		return f.networkRules.CreateRedirectResponse(req, redirectURL), nil
+	}
+
+	if len(appliedRules) > 0 {
+		f.actionObserver.OnFilterModify(req.Method, initialURL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		if taplog.Enabled() {
+			taplog.Log(reqLogFields("modify", req, initialURL, appliedRules, processInfo))
+		}
+	}
+
+	if len(appliedRules) == 0 && taplog.Enabled() {
+		taplog.Log(reqLogFields("allow", req, initialURL, nil, processInfo))
+	}
+
+	return nil, nil
+}
+
+// Finalize optimizes internal data structures after all filter lists have been loaded.
+// This method should be called once after all AddURL/AddReader calls are complete and before
+// the filter starts handling requests. Calling Finalize is not required for correctness,
+// but improves memory usage and lookup performance.
+//
+// Rules added after Finalize are not deduplicated.
+func (f *Filter) Finalize() {
+	f.seenMu.Lock()
+	f.seenRules = nil
+	f.seenMu.Unlock()
+
+	f.networkRules.Compact()
+}
+
+// HandleResponse handles the given response by matching it against the filter rules.
+// If the response should be modified, it modifies it in-place.
+//
+// As of April 2024, there are no response-only rules that can block or redirect responses.
+// For that reason, this method does not return a blocking or redirecting response itself.
+func (f *Filter) HandleResponse(req *http.Request, res *http.Response, processInfo process.Info) error {
+	if isDocumentNavigation(req, res) {
+		// 2026-10-08 (B2): resolve the exception-modifier exemptions for
+		// this document (AdGuard $elemhide/$generichide/$specifichide/
+		// $jsinject and the cosmetic/js components of $document) and pass
+		// them to the injector. ActiveExceptions is already gated to frame
+		// document loads (C5, docs 1119); isDocumentNavigation additionally
+		// requires an HTML response. The zero value keeps pre-B2 behavior.
+		ex := f.networkRules.ActiveExceptions(req)
+		if err := f.injector.Inject(req, res, ex); err != nil {
+			// This injection error is recoverable, so we log it and continue processing the response.
+			log.Printf("error injecting assets for %q: %v", redacted.Redacted(req.URL), err)
+		}
+	}
+
+	// [2026-10-08 采集 v4] 取证转储：/youtubei/v1/ API 响应 + youtube HTML 文档
+	// （赞助商内容可内嵌于文档的 ytInitialData）。读前 1MB 落盘，剩余用
+	// MultiReader 原样续传，不改变响应流。
+	if taplog.Enabled() && req.URL != nil && res.Body != nil {
+		isAPI := strings.HasPrefix(req.URL.Path, "/youtubei/v1/")
+		isYTHTML := strings.EqualFold(req.URL.Hostname(), "www.youtube.com") &&
+			strings.HasPrefix(res.Header.Get("Content-Type"), "text/html")
+		if isAPI || isYTHTML {
+			buf, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+			if isAPI {
+				taplog.DumpAPIBody(req.URL.String(), buf)
+			} else {
+				taplog.DumpHTMLBody(req.URL.String(), buf)
+			}
+			if len(buf) < 1<<20 {
+				res.Body = io.NopCloser(bytes.NewReader(buf))
+			} else {
+				res.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buf), res.Body), Closer: res.Body}
+			}
+		}
+	}
+
+	appliedRules, err := f.networkRules.ModifyRes(req, res)
+	if err != nil {
+		if taplog.Enabled() {
+			taplog.Log(resLogFields("error", req, res, nil, err))
+		}
+		return fmt.Errorf("apply network rules: %v", err)
+	}
+	if len(appliedRules) > 0 {
+		f.actionObserver.OnFilterModify(req.Method, req.URL.String(), req.Header.Get("Referer"), appliedRules, processInfo)
+		if taplog.Enabled() {
+			taplog.Log(resLogFields("modify", req, res, appliedRules, nil))
+		}
+	}
+
+	return nil
+}
+
+// readCloser 组合 Reader 与 Closer：转储后把未读部分原样续传给响应流。
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func isDocumentNavigation(req *http.Request, res *http.Response) bool {
+	// Reference: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Dest#directives
+	// Note: Although not explicitly stated in the spec, Fetch Metadata Request Headers are only included in requests sent to HTTPS endpoints.
+	if req.URL.Scheme == "https" {
+		secFetchDest := req.Header.Get("Sec-Fetch-Dest")
+		if secFetchDest != "document" && secFetchDest != "iframe" {
+			return false
+		}
+	}
+
+	contentType := res.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	if mediaType != "text/html" {
+		return false
+	}
+
+	return true
+}
+
+// reqLogFields builds one decision-tap payload for a request outcome
+// (2026-10-08 reproduction diagnostics; no-op unless ZEN_DECISION_LOG=1).
+func reqLogFields(decision string, req *http.Request, initialURL *url.URL, rules []rule.Rule, processInfo process.Info) map[string]any {
+	fld := map[string]any{
+		"kind":     "req",
+		"decision": decision,
+		"method":   req.Method,
+		"url":      initialURL.String(),
+		"host":     initialURL.Hostname(),
+		"referer":  req.Header.Get("Referer"),
+	}
+	if facts, ok := taplog.FactsFromContext(req.Context()); ok {
+		fld["inbound_h2"] = facts.InboundH2
+	}
+	if processInfo.PID != 0 {
+		fld["pid"] = processInfo.PID
+		if name, err := processInfo.Name(); err == nil {
+			fld["pname"] = name
+		}
+	}
+	return appendRuleFields(fld, rules)
+}
+
+// resLogFields builds one decision-tap payload for a response outcome.
+func resLogFields(decision string, req *http.Request, res *http.Response, rules []rule.Rule, err error) map[string]any {
+	fld := map[string]any{
+		"kind":     "res",
+		"decision": decision,
+		"method":   req.Method,
+		"url":      req.URL.String(),
+		"host":     req.URL.Hostname(),
+		"status":   res.StatusCode,
+		"ctype":    res.Header.Get("Content-Type"),
+	}
+	if res.ContentLength != 0 {
+		fld["clen"] = res.ContentLength
+	}
+	if err != nil {
+		fld["err"] = err.Error()
+	}
+	return appendRuleFields(fld, rules)
+}
+
+// appendRuleFields adds the applied rules (raw text + source list) to a
+// decision-tap payload.
+func appendRuleFields(fld map[string]any, rules []rule.Rule) map[string]any {
+	if len(rules) == 0 {
+		return fld
+	}
+	raws := make([]string, len(rules))
+	for i, r := range rules {
+		if r.FilterName != nil {
+			raws[i] = *r.FilterName + " :: " + r.RawRule
+		} else {
+			raws[i] = r.RawRule
+		}
+	}
+	fld["rules"] = raws
+	return fld
+}

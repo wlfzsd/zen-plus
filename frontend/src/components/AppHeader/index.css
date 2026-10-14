@@ -1,0 +1,30 @@
+.heading {
+  margin: 0 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(17, 20, 24, 0.15);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bp6-dark .heading {
+  border-color: hsla(0, 0%, 100%, 0.2);
+}
+
+.heading__branding {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.heading__logo,
+.heading__zen {
+  height: 20px;
+  width: auto;
+  fill: rgb(28, 33, 39);
+}
+
+#app.bp6-dark .heading__logo,
+#app.bp6-dark .heading__zen {
+  fill: #fff;
+}

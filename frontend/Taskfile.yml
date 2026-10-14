@@ -1,0 +1,32 @@
+version: '3'
+
+tasks:
+  lint:
+    desc: Runs linter.
+    dir: frontend
+    cmd: npm run lint
+
+  lint:fix:
+    desc: Automatically fixes applicable linting issues.
+    dir: frontend
+    cmd: npm run lint:fix
+
+  fmt:
+    desc: Runs code formatting check.
+    dir: frontend
+    cmd: npm run fmt
+
+  fmt:fix:
+    desc: Automatically fixes applicable code formatting issues.
+    dir: frontend
+    cmd: npm run fmt:fix
+
+  install:
+    desc: Installs the complete set of dependencies.
+    dir: frontend
+    cmd: npm ci
+
+  extract-translations:
+    desc: Extract i18n translation keys from source code.
+    dir: frontend
+    cmd: npm run extract-translations

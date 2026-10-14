@@ -1,0 +1,81 @@
+COVER: ||addthis.com^$third-party
+COVERED: ||addthis.com/red/$script,third-party
+---
+COVER: ||popt.in^$third-party
+COVERED: ||popt.in^$third-party,domain=~poptin.com
+---
+COVER: ||springserve.com^$third-party
+COVERED: ||springserve.com^$~media,third-party
+---
+COVER: ||rdr.wargaming.net^$third-party
+COVERED: ||rdr.wargaming.net^$subdocument,third-party
+---
+COVER: ||iplogger.org^$third-party
+COVERED: ||iplogger.org^$third-party,domain=~iplogger.com
+---
+COVER: ||questionpro.com^$third-party
+COVERED: ||questionpro.com^$third-party,domain=~questionpro.com.au|~questionpro.eu
+---
+COVER: ||rs6.net^$third-party
+COVERED: ||rs6.net^$image,script,third-party
+---
+COVER: ||applicationinsights.azure.com^$domain=~azure.net
+COVERED: ||applicationinsights.azure.com^$third-party,domain=~azure.net
+---
+COVER: ||js.trendmd.com^$third-party
+COVERED: ||js.trendmd.com^$script,subdocument,third-party
+---
+COVER: ||outbrainimg.com^$third-party
+COVERED: ||outbrainimg.com/transform/$media,third-party
+---
+COVER: ||onelink.me^$third-party
+COVERED: ||onelink.me^$image,script,third-party
+---
+COVER: ||piwik.pro^$third-party
+COVERED: ||piwik.pro^$third-party,domain=~clearcode.cc|~clearcode.pl|~piwikpro.de
+---
+COVER: ||sumologic.com^$third-party
+COVERED: ||sumologic.com^$third-party,domain=~sumologic.net
+---
+COVER: ||urldefense.com^$third-party
+COVERED: ||urldefense.com^$image,third-party
+---
+COVER: ||click.aliexpress.com^$image
+COVERED: ||click.aliexpress.com^$image,script
+---
+COVER: ||media.net^$third-party
+COVERED: ||media.net^$object,script,third-party,xmlhttprequest
+---
+COVER: ||skimresources.com^$third-party
+COVERED: ||skimresources.com^$script,subdocument,third-party
+---
+COVER: ||cpmstar.com^$third-party
+COVERED: ||cpmstar.com^$object,third-party
+---
+COVER: ||adtival.network^$third-party
+COVERED: ||adtival.network^$third-party,subdocument
+---
+COVER: ||pornpics.com^$subdocument
+COVERED: ||pornpics.com^$subdocument,~xmlhttprequest
+---
+COVER: ||wipe.de^$third-party
+COVERED: ||wipe.de^$~script,third-party
+---
+COVER: ||geo.query.yahoo.com^$domain=~mail.yahoo.com
+COVERED: ||geo.query.yahoo.com^$~xmlhttprequest,domain=~mail.yahoo.com
+---
+COVER: ||frog.wix.com^$ping,xmlhttprequest
+COVERED: ||frog.wix.com^$image,ping,xmlhttprequest
+---
+COVER: ||o2.pl^$replace=/(<VAST[\s\S]*?>)[\s\S]*<\/VAST>/\$1<\/VAST>/,xmlhttprequest,other,~script
+COVERED: ||o2.pl^$replace=/(<VAST[\s\S]*?>)[\s\S]*<\/VAST>/\$1<\/VAST>/,xmlhttprequest,other,~script,domain=~poczta.o2.pl
+---
+COVER: ||pgs.io^$third-party
+COVERED: ||pgs.io^$third-party,domain=~publicgood.com
+---
+COVER: ||researchnow.co.uk^$third-party
+COVERED: ||researchnow.co.uk^$third-party,domain=~dynata.com
+---
+COVER: ||datadome.co^$third-party
+COVERED: ||datadome.co^$third-party,domain=~paypal.com
+---

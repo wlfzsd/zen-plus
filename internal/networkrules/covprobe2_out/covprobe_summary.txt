@@ -1,0 +1,61 @@
+=== 装载统计（生产同构管线）===
+总行数                857371
+注释/空行(ignored)    30287
+外观/脚本(cosmetic)   92072
+行级精确去重(≈#804)   165613
+解析失败(err)         2442
+badfilter 收集        151  (审计锚点 Collected=151 FullDisabled=52 Partial=563)
+复核失败(invalid)     4544
+  invalid样本: @@||jetzt.de^$generichide
+  invalid样本: @@://10.0.0.$generichide
+  invalid样本: @@://10.1.1.$generichide
+  invalid样本: @@://127.0.0.1$generichide
+  invalid样本: @@://192.168.$generichide
+  invalid样本: @@://localhost/$generichide
+  invalid样本: @@://localhost:$generichide
+  invalid样本: @@||accounts.google.com^$generichide
+  invalid样本: @@||ads.microsoft.com^$generichide
+  invalid样本: @@||adsmanager.facebook.com^$generichide
+  invalid样本: @@||amazon.ae^$generichide
+  invalid样本: @@||amazon.ca^$generichide
+  invalid样本: @@||amazon.cn^$generichide
+  invalid样本: @@||amazon.co.jp^$generichide
+  invalid样本: @@||amazon.co.uk^$generichide
+  invalid样本: @@||amazon.com.au^$generichide
+  invalid样本: @@||amazon.com.br^$generichide
+  invalid样本: @@||amazon.com.mx^$generichide
+  invalid样本: @@||amazon.com.tr^$generichide
+  invalid样本: @@||amazon.com^$generichide
+入库行(accepted)      562262
+=== 存储规则数 ===
+primaryStore          535326 (regexp 339, generic 44)
+exceptionStore        14608
+actionIdx             2267
+recs(入册)            562259
+=== 覆盖去重上限（同签名＋纯域名/域名rest＋无条件/动作修饰符＋badfilter 安全）===
+纯域名规则            259468
+域名rest规则          42809
+可去重(droppable)     14602  (其中 rest 形态 816)
+  同列表内            2579
+  跨列表              12023
+  其中 hosts 派生     3707
+  曾被 badfilter 禁用 1
+因 badfilter 不安全   1
+内存估算 @419B/规则   5.8 MB
+=== C3 条件修饰符严格包含（批次4 新测量，interner 后边际口径）===
+C3 可剪               27
+C3 堆投影 @300B/规则  0.0 MB（树节点+Rule+RawRule，修饰符块已共享）
+=== 等价写法（别名归一＋修饰符排序）上限 ===
+等价组                443
+可省重复              449
+混合 badfilter 危险组 0
+=== 各列表可去重贡献 ===
+        97  EasyList
+      4724  AdGuard-Base
+      4803  EasyPrivacy
+      1076  AdGuard-Spyware
+       292  Phishing
+      2962  Dan-Pollock
+       453  Peter-Lowe
+       132  AdGuard-CN
+        63  anti-AD

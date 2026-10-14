@@ -1,0 +1,537 @@
+package ruletree
+
+import (
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/irbis-sh/zen-desktop/internal/ruletree/byteset"
+)
+
+type Data comparable
+
+// Tree is a prefix tree for storing and retrieving data
+// associated with adblock-style patterns.
+//
+// Insert and Compact must not run concurrently with Get.
+type Tree[T Data] struct {
+	// insertMu protects the tree during inserts.
+	insertMu sync.Mutex
+
+	root *node[T]
+	// domainBoundaryRoot stores patterns beginning with tokenDomainBoundary (||).
+	domainBoundaryRoot *node[T]
+	// anchorRoot stores pattern beginning with tokenAnchor (|).
+	anchorRoot *node[T]
+
+	// lpOnce lazily initializes the GetLP pools (2026-10-06): generic New
+	// closures cannot be static package variables.
+	lpOnce  sync.Once
+	accPool sync.Pool
+	mapPool sync.Pool
+	// visPool (2026-10-08 P6 memo) backs the per-call (node, offset)
+	// memoization maps used for combinatorial URLs; see maxMemoFreeURLLen.
+	visPool sync.Pool
+	// tailPool (2026-10-08 P6 memo) backs the per-call wildcard-tail
+	// subsumption maps (tail node → smallest walked offset).
+	tailPool sync.Pool
+
+	// arena (2026-10-13 内存轴；2026-10-14 阶段1c 接线 1B 打包) packs node
+	// prefix tokens into large chunks as PACKED BYTES (1 byte per token,
+	// escapes for 0xFA-0xFF literals — see tokenize.go). Previously every
+	// node's prefix pointed into tokenize()'s per-pattern allocation
+	// (append-grown, cap up to 2×len) and then into 2-byte token chunks;
+	// the packed arena stores exactly the packed prefix bytes of all nodes,
+	// halving the footprint. Used only under insertMu (Insert); readers
+	// (Get/GetLP/Walk/Compact/PruneValues) see immutable bytes.
+	arena tokenArena
+	// tkScratch reuses the per-Insert tokenize buffer (under insertMu).
+	tkScratch []token
+}
+
+// tokenArenaChunkBytes sizes one arena chunk: 64 KiB of packed prefix bytes,
+// so a full 792k-rule load lands in ~80 chunks (visible as few heap objects).
+const tokenArenaChunkBytes = 1 << 16
+
+// tokenArena hands out exactly-sized packed-byte ranges carved from big
+// chunks (2026-10-14 阶段1c：1 字节/token，见 tokenize.go 编码).
+type tokenArena struct {
+	chunks [][]byte
+	cur    []byte
+}
+
+func (a *tokenArena) alloc(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	if len(a.cur) < n {
+		size := tokenArenaChunkBytes
+		if n > size {
+			size = n
+		}
+		a.cur = make([]byte, size)
+		a.chunks = append(a.chunks, a.cur)
+	}
+	out := a.cur[:n:n]
+	a.cur = a.cur[n:]
+	return out
+}
+
+// packLen reports the packed byte length of one token: 1, or 2 for escaped
+// literals 0xFA-0xFF.
+func packLen(tk token) int {
+	if tk <= token(packLitMax) || tk > 255 {
+		return 1
+	}
+	return 2
+}
+
+// arenaPack packs s into the arena as packed bytes (tokenize.go encoding) and
+// returns the base pointer and packed byte length, replacing prefixBaseOf on
+// freshly tokenized patterns so nodes no longer pin whole per-pattern
+// allocations. Empty s returns (nil, 0).
+func (t *Tree[T]) arenaPack(s []token) (*byte, int) {
+	n := 0
+	for _, tk := range s {
+		n += packLen(tk)
+	}
+	if n == 0 {
+		return nil, 0
+	}
+	p := t.arena.alloc(n)
+	off := 0
+	for _, tk := range s {
+		switch {
+		case tk <= token(packLitMax):
+			p[off] = byte(tk)
+			off++
+		case tk <= 255:
+			p[off] = packEscape
+			p[off+1] = byte(tk)
+			off += 2
+		case tk == tokenWildcard:
+			p[off] = packWildcard
+			off++
+		case tk == tokenDomainBoundary:
+			p[off] = packDomain
+			off++
+		case tk == tokenSeparator:
+			p[off] = packSeparator
+			off++
+		default:
+			p[off] = packAnchor
+			off++
+		}
+	}
+	return &p[0], n
+}
+
+// MaxVisitedEntries (2026-10-08 P6 budget) caps the per-call (node, offset)
+// memoization pairs. It is a tunable safety valve, not part of the
+// memoization semantics: memoized traversal of realistic URLs stays orders
+// of magnitude below it (a 1017-char alicdn combo URL uses ~10⁴ pairs), so
+// hitting it means an unknown pathological pattern/URL combination. A call
+// that exhausts the budget abandons further sub-traversals (fail-open:
+// partial candidate set, request proceeds — the same net behavior the old
+// engine had when a pathological URL hung past its deadline) and bumps the
+// atomic counter exposed by TraversalBudgetExceeded.
+var MaxVisitedEntries = 1_000_000
+
+// budgetExceededCalls counts GetLP calls that exhausted MaxVisitedEntries.
+var budgetExceededCalls atomic.Uint64
+
+// TraversalBudgetExceeded reports how many GetLP calls exhausted the
+// per-call traversal budget (MaxVisitedEntries) since process start.
+func TraversalBudgetExceeded() uint64 { return budgetExceededCalls.Load() }
+
+// maxMemoFreeURLLen (2026-10-08 P6 memo): URLs at or below this length are
+// traversed WITHOUT the (node, offset) memoization map — the common short
+// request pays zero extra cost per visit. Longer URLs enable memoization
+// from the first visit. Enabling or disabling memoization never changes
+// results: a repeat (node, offset) entry collects only values already in
+// the dedup map (inserted, in the same relative order, by the pair's first
+// entry), so any subset of repeat-skips preserves the output sequence
+// bit-for-bit — the gate is a pure performance valve, not a semantic switch.
+const maxMemoFreeURLLen = 256
+
+func New[T Data]() *Tree[T] {
+	return &Tree[T]{
+		root:               &node[T]{},
+		domainBoundaryRoot: &node[T]{},
+		anchorRoot:         &node[T]{},
+	}
+}
+
+// Insert adds a pattern with associated data to the tree.
+func (t *Tree[T]) Insert(pattern string, v T) {
+	if pattern == "" {
+		return
+	}
+
+	var parent *node[T]
+	var n *node[T]
+
+	t.insertMu.Lock()
+	defer t.insertMu.Unlock()
+
+	// 2026-10-13 内存轴: tokenize into the per-Tree scratch (no per-pattern
+	// allocation); node prefixes are copied into the arena below, so the
+	// scratch is dead weight the moment this Insert returns.
+	tokens := tokenizeInto(pattern, t.tkScratch[:0])
+	t.tkScratch = tokens[:0]
+
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == tokenDomainBoundary {
+			return
+		}
+	}
+
+	switch tokens[0] {
+	case tokenDomainBoundary:
+		n, tokens = t.domainBoundaryRoot, tokens[1:]
+	case tokenAnchor:
+		n, tokens = t.anchorRoot, tokens[1:]
+	default:
+		n = t.root
+	}
+
+	for {
+		if len(tokens) == 0 {
+			if n.isLeaf() {
+				n.leaf = append(n.leaf, v)
+			} else {
+				n.leaf = []T{v}
+			}
+			return
+		}
+
+		parent = n
+		n = n.getEdge(tokens[0])
+
+		if n == nil {
+			base, plen := t.arenaPack(tokens)
+			n := &node[T]{
+				prefixBase: base,
+				prefixLen:  plen,
+				leaf:       []T{v},
+			}
+			parent.addEdge(tokens[0], n)
+			return
+		}
+
+		commonTokens, commonBytes := longestPrefixPacked(tokens, n.prefixSlice())
+		if commonBytes == n.prefixLen {
+			tokens = tokens[commonTokens:]
+			continue
+		}
+
+		cbase, clen := t.arenaPack(tokens[:commonTokens])
+		child := &node[T]{
+			prefixBase: cbase,
+			prefixLen:  clen,
+		}
+		parent.updateEdge(tokens[0], child)
+
+		child.addEdge(unpackAt(n.prefixSlice(), commonBytes), n)
+		n.advancePrefix(commonBytes)
+
+		l := []T{v}
+		if commonTokens == len(tokens) {
+			child.leaf = l
+		} else {
+			nbase, nlen := t.arenaPack(tokens[commonTokens:])
+			n := &node[T]{
+				leaf:       l,
+				prefixBase: nbase,
+				prefixLen:  nlen,
+			}
+			child.addEdge(tokens[commonTokens], n)
+		}
+		return
+	}
+}
+
+// advancePrefix drops the first n tokens from the node's prefix.
+func (n *node[T]) advancePrefix(k int) {
+	n.prefixBase = prefixBaseOf(n.prefixSlice()[k:])
+	n.prefixLen -= k
+}
+
+// Get retrieves data matching the given URL.
+//
+// Results are deduplicated in deterministic first-occurrence order
+// (2026-10-08 P6): the traversal itself is ordered (sorted edges,
+// insertion-ordered leaves), so the only nondeterminism was the former
+// map-based dedup, whose map iteration order made the result sequence —
+// and with it the identity of the winning rule — vary between runs of the
+// same binary. The set of returned values is unchanged.
+//
+// The URL is expected to be a valid URL with scheme and host.
+func (t *Tree[T]) Get(url string) []T {
+	// 2026-10-08 P6 memo: Get delegates to GetLP. Both produce the same
+	// deterministic first-occurrence sequence (same traversal order, same
+	// dedup semantics — asserted by TestP6RuleTreeDeterminism's Get≡GetLP
+	// check), and delegation gives Get the (node, offset) memoization that
+	// keeps combinatorial URLs bounded.
+	return t.GetLP(url)
+}
+
+// getLegacy is the pre-delegation body of Get (map-per-sub-traversal merge),
+// retained unused as the reference implementation for audit comparison;
+// Get now delegates to GetLP (identical first-occurrence sequence).
+func (t *Tree[T]) getLegacy(url string) []T {
+	seen := make(map[T]struct{})
+	result := make([]T, 0)
+
+	addUnique := func(items []T) {
+		for _, item := range items {
+			if _, exists := seen[item]; !exists {
+				seen[item] = struct{}{}
+				result = append(result, item)
+			}
+		}
+	}
+
+	addUnique(t.anchorRoot.traverse(url))
+	addUnique(t.root.traverse(url))
+
+	var (
+		traverseNext = false
+
+		schemeEnd = strings.Index(url, "://")
+		hostStart = schemeEnd + 3
+		hostEnd   = strings.IndexAny(url[hostStart:], "/?")
+	)
+	for i := 1; i < len(url); i++ {
+		c := url[i]
+
+		if traverseNext {
+			addUnique(t.root.traverse(url[i:]))
+			traverseNext = isTraversalMarker(c)
+		} else if isTraversalMarker(c) {
+			addUnique(t.root.traverse(url[i:]))
+			traverseNext = true
+		}
+
+		if i == hostStart {
+			addUnique(t.domainBoundaryRoot.traverse(url[i:]))
+		}
+		if i > hostStart && (hostEnd == -1 || i < hostStart+hostEnd) {
+			if c == '.' {
+				addUnique(t.domainBoundaryRoot.traverse(url[i+1:]))
+			}
+		}
+	}
+
+	return result
+}
+
+// maxPooledAccEntries drops oversized pooled containers so a pathological
+// URL cannot make the pools hoard huge backings (defense in depth on top of
+// the in-traversal dedup; mirrors rulestore.maxPooledResEntries).
+const maxPooledAccEntries = 8192
+
+// GetLP is the low-allocation variant of Get (2026-10-06). Since P6
+// (2026-10-08) results are deduplicated in deterministic first-occurrence
+// order: identical value set, a stable identity sequence across runs of the
+// same binary, and identical sequences in Get and GetLP. It keeps
+//   - one shared accumulator for the whole traversal (node.visit), with the
+//     dedup applied DURING accumulation (traverser.dedup): a wildcard tail
+//     re-visits the same leaf at every URL position, which previously
+//     appended one copy per position and let a 68 KB URL grow the
+//     accumulator to ~180 MB per store (leak_capture heap_2.txt /
+//     goroutine_2.txt; CPU 3.9 cores + 2.1 GB resident), and
+//   - the accumulator and the dedup map served from per-tree sync.Pools, and
+//   - (2026-10-08 P6 memo) for URLs longer than maxMemoFreeURLLen, a pooled
+//     (node, offset) visited map so each sub-traversal runs at most once —
+//     combinatorial URLs (dense traversal markers × wildcard subtrees, e.g.
+//     a 1017-char alicdn "??,..." combo URL) previously re-walked the same
+//     subtrees from hundreds of starting offsets and exceeded 15 s; the
+//     memoization skips only accumulator-neutral repeats (semantic no-op).
+//
+// The returned slice is freshly allocated, exactly like Get. GetLP may run
+// concurrently with itself and with Get; the same Insert/Compact exclusion
+// as Get applies.
+func (t *Tree[T]) GetLP(url string) []T {
+	t.lpOnce.Do(func() {
+		t.accPool.New = func() any { return new([]T) }
+		t.mapPool.New = func() any { return make(map[T]struct{}, 64) }
+		t.visPool.New = func() any { return make(map[vKey[T]]struct{}) }
+		t.tailPool.New = func() any { return make(map[*node[T]]int) }
+	})
+
+	accp := t.accPool.Get().(*[]T)
+	acc := (*accp)[:0]
+
+	m := t.mapPool.Get().(map[T]struct{})
+	clear(m)
+
+	// (node, offset) memoization (2026-10-08 P6): enabled only above
+	// maxMemoFreeURLLen so the common short request pays nothing. Pure
+	// performance valve — repeat entries are accumulator-neutral, see the
+	// traverser.visited and maxMemoFreeURLLen comments.
+	memoOn := len(url) > maxMemoFreeURLLen
+	var vis map[vKey[T]]struct{}
+	var tailMin map[*node[T]]int
+	if memoOn {
+		vis = t.visPool.Get().(map[vKey[T]]struct{})
+		clear(vis)
+		tailMin = t.tailPool.Get().(map[*node[T]]int)
+		clear(tailMin)
+	}
+
+	tr := traverser[T]{data: acc, dedup: m, base: url, visited: vis, tailMin: tailMin}
+	tr.visit(t.anchorRoot, url)
+	tr.visit(t.root, url)
+
+	var (
+		traverseNext = false
+
+		schemeEnd = strings.Index(url, "://")
+		hostStart = schemeEnd + 3
+		hostEnd   = strings.IndexAny(url[hostStart:], "/?")
+	)
+	for i := 1; i < len(url); i++ {
+		c := url[i]
+
+		if traverseNext {
+			tr.visit(t.root, url[i:])
+			traverseNext = isTraversalMarker(c)
+		} else if isTraversalMarker(c) {
+			tr.visit(t.root, url[i:])
+			traverseNext = true
+		}
+
+		if i == hostStart {
+			tr.visit(t.domainBoundaryRoot, url[i:])
+		}
+		if i > hostStart && (hostEnd == -1 || i < hostStart+hostEnd) {
+			if c == '.' {
+				tr.visit(t.domainBoundaryRoot, url[i+1:])
+			}
+		}
+	}
+
+	acc = tr.data
+
+	result := make([]T, len(acc))
+	copy(result, acc)
+
+	// Defense in depth (P6): never pool oversized containers. The
+	// in-traversal dedup already bounds acc by the number of distinct
+	// matched values; this keeps a pathological tree from pinning memory.
+	if cap(acc) <= maxPooledAccEntries {
+		*accp = acc[:0]
+		t.accPool.Put(accp)
+	}
+	if len(m) <= maxPooledAccEntries {
+		t.mapPool.Put(m)
+	}
+	if memoOn && len(vis) <= maxPooledAccEntries {
+		t.visPool.Put(vis)
+	}
+	if memoOn && len(tailMin) <= maxPooledAccEntries {
+		t.tailPool.Put(tailMin)
+	}
+	return result
+}
+
+// Walk calls fn for every value stored in the tree — under all three roots,
+// in no particular order (2026-10-08 B6). The same Insert/Compact exclusion
+// applies: Walk must not run concurrently with Insert.
+func (t *Tree[T]) Walk(fn func(T)) {
+	t.insertMu.Lock()
+	defer t.insertMu.Unlock()
+
+	var rec func(*node[T])
+	rec = func(n *node[T]) {
+		for _, v := range n.leaf {
+			fn(v)
+		}
+		for _, e := range n.edges {
+			rec(e.node)
+		}
+	}
+	rec(t.root)
+	rec(t.domainBoundaryRoot)
+	rec(t.anchorRoot)
+}
+
+// longestPrefixPacked compares the token slice against a packed prefix and
+// returns (k, cp): the number of shared leading tokens and the packed byte
+// length of that shared prefix. Whole-token units only — escape pairs are
+// never split (tokenize.go encoding contract).
+func longestPrefixPacked(tokens []token, packed []byte) (int, int) {
+	k, cp := 0, 0
+	for k < len(tokens) && cp < len(packed) {
+		tk := tokens[k]
+		switch {
+		case tk <= token(packLitMax):
+			if packed[cp] != byte(tk) {
+				return k, cp
+			}
+			cp++
+		case tk <= 255:
+			if cp+1 >= len(packed) || packed[cp] != packEscape || packed[cp+1] != byte(tk) {
+				return k, cp
+			}
+			cp += 2
+		case tk == tokenWildcard:
+			if packed[cp] != packWildcard {
+				return k, cp
+			}
+			cp++
+		case tk == tokenDomainBoundary:
+			if packed[cp] != packDomain {
+				return k, cp
+			}
+			cp++
+		case tk == tokenSeparator:
+			if packed[cp] != packSeparator {
+				return k, cp
+			}
+			cp++
+		default: // tokenAnchor
+			if packed[cp] != packAnchor {
+				return k, cp
+			}
+			cp++
+		}
+		k++
+	}
+	return k, cp
+}
+
+// unpackAt decodes the token starting at packed[off] (off is always a token
+// boundary: escape pairs are never split).
+func unpackAt(packed []byte, off int) token {
+	switch b := packed[off]; b {
+	case packWildcard:
+		return tokenWildcard
+	case packSeparator:
+		return tokenSeparator
+	case packAnchor:
+		return tokenAnchor
+	case packDomain:
+		return tokenDomainBoundary
+	case packEscape:
+		return token(packed[off+1])
+	default:
+		return token(b)
+	}
+}
+
+// traversalMarkers indicate traversal starting points in a URL.
+var traversalMarkers byteset.Set
+
+func init() {
+	const markerChars = "-._~:/?#[]@!$&'()*+,;%="
+	for i := range markerChars {
+		ch := markerChars[i]
+		traversalMarkers.Add(ch)
+	}
+}
+
+func isTraversalMarker(char byte) bool {
+	return traversalMarkers.Has(char)
+}

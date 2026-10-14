@@ -1,0 +1,41 @@
+import { Button, Tooltip } from '@blueprintjs/core';
+import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+
+import { AppToaster } from '@/common/toaster';
+import { ExportDebugData } from 'wails/go/config/Config';
+import { ClipboardSetText } from 'wails/runtime';
+
+export function ExportDebugDataButton() {
+  const [loading, setLoading] = useState(false);
+  const { t } = useTranslation();
+
+  return (
+    <Tooltip content={t('exportDebugDataButton.tooltip') as string}>
+      <Button
+        loading={loading}
+        onClick={async () => {
+          setLoading(true);
+          try {
+            const debugData = await ExportDebugData();
+            await ClipboardSetText(debugData);
+            AppToaster.show({
+              message: t('exportDebugDataButton.success'),
+              intent: 'success',
+            });
+          } catch (err) {
+            AppToaster.show({
+              message: t('exportDebugDataButton.error', { error: err }),
+              intent: 'danger',
+            });
+          } finally {
+            setLoading(false);
+          }
+        }}
+        className="export-debug-data__button"
+      >
+        {t('exportDebugDataButton.label')}
+      </Button>
+    </Tooltip>
+  );
+}

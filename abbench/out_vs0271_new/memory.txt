@@ -1,0 +1,1 @@
+tag=zenplus-eb309f4 loadMs=1037 liveHeapMB=135.5 peakHeapMB=311.2 heapSysMB=335.8 sysMB=351.9 rules=566656 parseErr=2400

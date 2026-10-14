@@ -1,0 +1,214 @@
+{
+  "app": {
+    "proxy": {
+      "description": "代理未激活。点击下方按钮以激活。",
+      "inactive": "激活代理以查看被拦截的请求"
+    },
+    "tabs": {
+      "filterLists": "过滤列表",
+      "home": "主页",
+      "rules": "规则",
+      "settings": "设置"
+    },
+    "update": {
+      "restart": "重启",
+      "restartFailed": "重新启动应用失败: {{error}}",
+      "restarting": "正在重启...",
+      "updateAvailable": "Zen 有新版本可用。"
+    }
+  },
+  "appRoutingSettings": {
+    "addApp": "添加应用",
+    "allowlistMode": "仅代理选中的应用",
+    "blocklistMode": "代理除选中项以外的所有应用",
+    "description": "选择哪些应用应使用 Zen 的代理。",
+    "emptyAllowlistWarning": "未选择任何应用。所有流量都将绕过 Zen。",
+    "label": "应用路由",
+    "removeApp": "移除应用",
+    "saveError": "保存应用路由设置失败：{{error}}",
+    "selectError": "选择应用失败：{{error}}"
+  },
+  "autoStartSwitch": {
+    "description": "登录时自动启动 Zen",
+    "disableError": "禁用自动启动失败：{{error}}",
+    "enableError": "启用自动启动失败：{{error}}",
+    "label": "自动启动"
+  },
+  "common": {
+    "stopProxyToAddFilter": "请停止代理以添加新过滤列表",
+    "stopProxyToDeleteFilter": "请停止代理以删除此过滤列表",
+    "stopProxyToEditRules": "请停止代理以修改自定义规则",
+    "stopProxyToModify": "请停止代理以修改此设置",
+    "stopProxyToToggleFilter": "请停止代理以启用/禁用此过滤列表"
+  },
+  "createFilterList": {
+    "addError": "添加过滤列表失败：{{error}}",
+    "addList": "添加过滤列表",
+    "trustedListsWarning": "受信任列表可以使用强大的拦截功能，例如 <code>trusted-</code> 脚本片段和 JavaScript 规则，但<strong>若被恶意方劫持，可能会破坏隐私和安全</strong>。仅对您信任的来源启用此选项。"
+  },
+  "donate": "捐赠",
+  "exportDebugDataButton": {
+    "error": "导出调试数据失败：{{error}}",
+    "label": "导出调试数据",
+    "success": "调试数据已复制到剪贴板",
+    "tooltip": "将调试信息复制到剪贴板"
+  },
+  "exportFilterList": {
+    "errorMessage": "导出过滤列表失败：{{error}}",
+    "export": "导出",
+    "successMessage": "自定义过滤列表导出成功"
+  },
+  "exportLogsButton": {
+    "label": "导出日志",
+    "openError": "打开日志目录失败：{{error}}",
+    "tooltip": "打开日志目录"
+  },
+  "filterLists": {
+    "copied": "已复制",
+    "copy": "复制链接",
+    "delete": "删除",
+    "goTo": "在浏览器中打开",
+    "more": "更多",
+    "removeError": "移除过滤列表失败：{{error}}",
+    "toggleError": "切换过滤列表失败：{{error}}",
+    "trusted": "受信任",
+    "whatIsThis": "这是什么"
+  },
+  "filterTypes": {
+    "ads": "广告",
+    "custom": "自定义",
+    "digitalWellbeing": "数字健康",
+    "general": "通用",
+    "malware": "恶意软件",
+    "privacy": "隐私",
+    "regional": "地区性"
+  },
+  "ignoredHostsInput": {
+    "description": "不使用代理的主机。用于证书固定或代理干扰的服务。",
+    "helper": "每行一个主机名。",
+    "label": "忽略的主机"
+  },
+  "importFilterList": {
+    "errorMessage": "导入过滤列表失败：{{error}}",
+    "import": "导入",
+    "successMessage": "自定义过滤列表导入成功"
+  },
+  "intro": {
+    "buttons": {
+      "next": "下一步",
+      "skip": "跳过介绍"
+    },
+    "connect": {
+      "caNote": "首次启动时，Zen 可能会提示您安装本地根 CA 证书。这将启用 HTTPS 过滤，使 Zen 能够在所有网站上拦截广告和跟踪器。所有操作均在本地进行——<strong>您的数据永不会离开您的设备</strong>。<br />详细技术信息请查看我们的 GitHub。",
+      "description": "您已准备就绪。点击“开始”以启用 Zen 的全面网络保护。",
+      "donateText": "并考虑在以下平台捐赠：",
+      "socialText": "如果您愿意，可以关注我们的社交媒体：",
+      "title": "一切就绪！"
+    },
+    "filterLists": {
+      "description": "为了启用广告拦截和隐私保护，Zen 使用了<strong>过滤列表</strong>。您也可以稍后在应用中进行设置。",
+      "recommendation": "根据您的地区，我们建议启用以下过滤列表：",
+      "title": "过滤列表"
+    },
+    "settings": {
+      "description": "请查看以下设置：",
+      "settingsNote": "您也可以随时在应用中更改这些设置。",
+      "title": "设置"
+    },
+    "welcome": {
+      "description": "选择您的语言：",
+      "title": "欢迎使用 Zen！"
+    }
+  },
+  "pacPortInput": {
+    "description": "PAC（代理自动配置）服务器监听的端口（0 为随机）。",
+    "helper": "使用 1024 以下的端口可能需要管理员权限。",
+    "label": "PAC 服务器端口",
+    "setError": "设置 PAC 服务器端口失败：{{error}}"
+  },
+  "portInput": {
+    "description": "代理服务器监听的端口（0 为随机）。",
+    "helper": "使用 1024 以下的端口可能需要管理员权限。",
+    "label": "代理端口"
+  },
+  "requestLog": {
+    "emptyState": "开始浏览以查看被拦截的请求。",
+    "filterName": "过滤器名称",
+    "method": "方法",
+    "process": "进程",
+    "processName": "名称",
+    "processPath": "路径",
+    "redirectedTo": "重定向到",
+    "referer": "来源",
+    "request": "请求",
+    "rule": "规则",
+    "rules": "规则",
+    "url": "网址"
+  },
+  "rules": {
+    "help": "帮助",
+    "placeholder": "在此添加您的自定义规则..."
+  },
+  "settings": {
+    "about": {
+      "changelog": "更新日志",
+      "tagline": "您的全面广告拦截与隐私保护工具",
+      "version": "版本"
+    },
+    "ca": {
+      "confirmTitle": "您确定要卸载 CA 吗？",
+      "errorMessage": "卸载 CA 失败：{{error}}",
+      "reasons": {
+        "malfunctioning": "您怀疑 CA 安装异常，可能表现为浏览器访问 HTTPS 网站时出错，或其他应用无法连接网络。",
+        "uninstall": "您希望完全卸载 Zen。"
+      },
+      "reinstallInfo": "如果您再次启动 Zen，将安装新的 CA。",
+      "stopProxyTooltip": "停止代理以卸载 CA",
+      "successMessage": "CA 卸载成功",
+      "uninstallButton": "卸载 CA",
+      "uninstallConfirm": "卸载",
+      "usefulIf": "在以下情况下可能有用"
+    },
+    "language": {
+      "helper": "选择您偏好的语言",
+      "label": "语言"
+    },
+    "sections": {
+      "advanced": "高级",
+      "app": "应用"
+    },
+    "theme": {
+      "chooseTheme": "选择主题",
+      "dark": "深色",
+      "light": "浅色",
+      "system": "跟随系统主题"
+    },
+    "updates": {
+      "automaticUpdates": "自动下载更新",
+      "description": "启用后，Zen 将自动检查更新。",
+      "disableError": "无法禁用自动更新：{{error}}",
+      "enableError": "无法启用自动更新：{{error}}"
+    }
+  },
+  "upstreamProxyInput": {
+    "description": "将所有出站流量经上游代理转发。支持 HTTP、HTTPS 与 SOCKS5。",
+    "enabled": "启用",
+    "helper": "修改在代理重启后生效。",
+    "host": "主机",
+    "label": "上游代理",
+    "password": "密码",
+    "port": "端口",
+    "saveError": "保存上游代理失败：{{error}}",
+    "typeHttp": "HTTP",
+    "typeHttps": "HTTPS",
+    "typeSocks5": "SOCKS5",
+    "username": "用户名"
+  },
+  "startStopButton": {
+    "start": "启动",
+    "startError": "启动代理失败：{{error}}",
+    "stop": "停止",
+    "stopError": "停止代理失败：{{error}}",
+    "unsupportedDEGuide": "目前仅支持 GNOME 和 KDE 的系统代理自动配置。<br />请按照 <guide-link>此指南</guide-link> 按应用设置代理。"
+  }
+}

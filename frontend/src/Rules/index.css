@@ -1,0 +1,20 @@
+.rules {
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 8px);
+}
+
+.rules__help-button {
+  margin-bottom: 8px;
+}
+
+.rules__textarea {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  height: 100% !important;
+}
+
+.rules__tooltip {
+  height: 100%;
+  width: 100%;
+}

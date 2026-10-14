@@ -1,0 +1,209 @@
+package httprewrite
+
+import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"strings"
+
+	"github.com/andybalholm/brotli"
+	"github.com/hashicorp/go-multierror"
+	"github.com/klauspost/compress/zstd"
+	"golang.org/x/net/html/charset"
+)
+
+// StreamRewrite decodes the HTTP response body and passes it to the processor
+// for transformation in a streaming fashion.
+//
+// It automatically handles decompression and character set conversion to UTF-8.
+// The processor receives the unpacked (decompressed and decoded) response body as an io.ReadCloser and
+// writes the transformed output to the provided io.PipeWriter. The processor
+// is responsible for closing both streams.
+func StreamRewrite(res *http.Response, processor func(src io.ReadCloser, dst *io.PipeWriter)) error {
+	rawBodyReader, mimeType, err := getRawBodyReader(res)
+	if err != nil {
+		return fmt.Errorf("get raw body reader: %v", err)
+	}
+
+	reader, writer := io.Pipe()
+
+	go processor(rawBodyReader, writer)
+
+	res.Body = reader
+	// Content-Length cannot be determined ahead of time.
+	// To get around this, the response is chunked to allow for HTTP connection reuse without having to TCP FIN terminate each connection.
+	res.ContentLength = -1
+	res.Header.Del("Content-Length")
+	res.Header.Del("Content-Encoding")
+	res.TransferEncoding = []string{"chunked"}
+	res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+	return nil
+}
+
+// BufferRewrite reads and decodes the HTTP response body, applies a transformation
+// to it using the provided processor function, and replaces the original body
+// with the transformed version.
+//
+// It automatically handles decompression and character set conversion to UTF-8.
+// The processor receives the fully buffered, unpacked (decompressed and decoded) body as input and returns
+// a modified byte slice.
+func BufferRewrite(res *http.Response, processor func(src []byte) []byte) error {
+	rawBodyReader, mimeType, err := getRawBodyReader(res)
+	if err != nil {
+		return fmt.Errorf("get raw body reader: %v", err)
+	}
+
+	rawBody, err := io.ReadAll(rawBodyReader)
+	if err != nil {
+		return fmt.Errorf("read body: %v", err)
+	}
+
+	processedBody := processor(rawBody)
+
+	res.Body = io.NopCloser(bytes.NewReader(processedBody))
+	res.ContentLength = int64(len(processedBody))
+	res.Header.Set("Content-Length", fmt.Sprint(len(processedBody)))
+	res.TransferEncoding = nil
+	res.Header.Del("Content-Encoding")
+	res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+	return nil
+}
+
+// BufferRewriteLimited behaves like BufferRewrite but skips the transformation
+// when the decoded body is larger than limit bytes: overLimit reports true and
+// the response body is passed through unchanged (already decompressed and
+// decoded to UTF-8, chunked since the final length is unknown).
+//
+// Used by $replace, whose documented semantics skip responses larger than
+// 10 MB; buffering such bodies whole just to leave them untouched would be
+// wasteful. 2026-10-08 (batch B8).
+func BufferRewriteLimited(res *http.Response, limit int64, processor func(src []byte) []byte) (overLimit bool, err error) {
+	rawBodyReader, mimeType, err := getRawBodyReader(res)
+	if err != nil {
+		return false, fmt.Errorf("get raw body reader: %v", err)
+	}
+
+	lr := io.LimitedReader{R: rawBodyReader, N: limit + 1}
+	head, err := io.ReadAll(&lr)
+	if err != nil {
+		rawBodyReader.Close()
+		return false, fmt.Errorf("read body: %v", err)
+	}
+
+	if int64(len(head)) > limit {
+		// Over the limit: stream the already-buffered head plus the rest of
+		// the decoded body through unchanged. rawBodyReader's Close closes
+		// the decompressor and the original body once the client is done.
+		res.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), rawBodyReader), rawBodyReader}
+		res.ContentLength = -1
+		res.Header.Del("Content-Length")
+		res.Header.Del("Content-Encoding")
+		res.TransferEncoding = []string{"chunked"}
+		res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+		return true, nil
+	}
+
+	processedBody := processor(head)
+
+	res.Body = io.NopCloser(bytes.NewReader(processedBody))
+	res.ContentLength = int64(len(processedBody))
+	res.Header.Set("Content-Length", fmt.Sprint(len(processedBody)))
+	res.TransferEncoding = nil
+	res.Header.Del("Content-Encoding")
+	res.Header.Set("Content-Type", fmt.Sprintf("%s; charset=utf-8", mimeType))
+	return false, nil
+}
+
+// getRawBodyReader extracts an uncompressed, UTF-8 decoded body from a potentially compressed and non-UTF-8 encoded HTTP response.
+func getRawBodyReader(res *http.Response) (body io.ReadCloser, mimeType string, err error) {
+	encoding := res.Header.Get("Content-Encoding")
+	contentType := res.Header.Get("Content-Type")
+	mimeType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse content type %q: %v", contentType, err)
+	}
+	if encoding == "" && strings.ToLower(params["charset"]) == "utf-8" {
+		// The body is already UTF-8 encoded and not compressed.
+		return res.Body, mimeType, nil
+	}
+
+	decompressedReader, err := decompressReader(res.Body, encoding)
+	if err != nil {
+		return nil, "", fmt.Errorf("create decompressed reader for encoding %q: %v", encoding, err)
+	}
+
+	decodedReader, err := charset.NewReader(decompressedReader, contentType)
+	if err != nil {
+		// [2026-10-14 空body解码失败修复] charset 检测器需要预读 body 嗅探
+		// 编码；body 为空/立即 EOF（1688 风控对部分会话发"头到 body 死"响应，
+		// 2026-10-14 login.1688.com 实弹 6/6）时这里返回 EOF 错误。原实现在此
+		// Close decompressedReader——encoding=="" 时它就是 res.Body 本身——
+		// 把原始响应 body 关掉了；调用方 HandleResponse 是"记日志继续转发"
+		// 语义，随后 writeResp 读已关闭的 body → http2 errClosedResponseBody
+		// → panic(ErrAbortHandler) → 整条入站 h2 连接被掐 → 浏览器
+		// ERR_HTTP2_PROTOCOL_ERROR。修法：解码失败降级为"原文直通"——保留
+		// body 可读（未解码原文交给调用方，注入器在原字节上自行决策），body
+		// 永远存活，连接与请求照常完成。
+		return res.Body, mimeType, nil
+	}
+
+	return struct {
+		io.Reader
+		io.Closer
+	}{
+		decodedReader,
+		&multiCloser{[]io.Closer{decompressedReader, res.Body}},
+	}, mimeType, nil
+}
+
+// decompressReader decompresses a reader using the specified compression algorithm.
+// It does not decompress data encoded with multiple algorithms.
+func decompressReader(reader io.ReadCloser, compressionAlg string) (io.ReadCloser, error) {
+	// Reference: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
+	switch strings.ToLower(compressionAlg) {
+	case "gzip":
+		gzipReader, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("create gzip reader: %v", err)
+		}
+		return gzipReader, nil
+	case "deflate":
+		return flate.NewReader(reader), nil
+	case "br":
+		return io.NopCloser(brotli.NewReader(reader)), nil
+	case "zstd":
+		zstdReader, err := zstd.NewReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("create zstd reader: %v", err)
+		}
+		return io.NopCloser(zstdReader), nil
+	case "":
+		return reader, nil
+	default:
+		return nil, errors.New("unsupported encoding")
+	}
+}
+
+// multiCloser wraps multiple io.Closers and ensures they are closed sequentially.
+type multiCloser struct {
+	closers []io.Closer
+}
+
+// Close iterates over each io.Closer and closes it, capturing any errors.
+func (m *multiCloser) Close() error {
+	var finalErr *multierror.Error
+	for _, closer := range m.closers {
+		if err := closer.Close(); err != nil {
+			finalErr = multierror.Append(finalErr, err)
+		}
+	}
+	return finalErr.ErrorOrNil()
+}

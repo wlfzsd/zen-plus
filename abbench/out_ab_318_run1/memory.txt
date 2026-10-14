@@ -1,0 +1,1 @@
+tag=new-318-eb309f4 loadMs=1828 liveHeapMB=135.4 peakHeapMB=363.6 heapSysMB=379.8 sysMB=394.7 rules=566656 parseErr=2400

@@ -1,0 +1,36 @@
+import resolve from '@rollup/plugin-node-resolve';
+import commonjs from '@rollup/plugin-commonjs';
+import typescript from '@rollup/plugin-typescript';
+import babel from '@rollup/plugin-babel';
+import terser from '@rollup/plugin-terser';
+
+export default {
+  input: 'src/index.ts',
+  output: {
+    file: 'dist/bundle.js',
+    format: 'iife',
+    name: 'scriptlet',
+  },
+  plugins: [
+    resolve(),
+    commonjs(),
+    typescript({
+      exclude: ['**/test/*.ts', '**/*.test.ts'],
+      noEmitOnError: true,
+    }),
+    babel({
+      babelHelpers: 'bundled',
+      presets: [
+        [
+          '@babel/preset-env',
+          {
+            useBuiltIns: false,
+          },
+        ],
+      ],
+      exclude: 'node_modules/**',
+      extensions: ['.js', '.ts'],
+    }),
+    terser(),
+  ],
+};
