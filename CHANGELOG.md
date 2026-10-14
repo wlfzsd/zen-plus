@@ -1,17 +1,32 @@
 # Changelog
 
-## v0.25.1
+## v3.1.8
 
-### What's New
+### v3.1.8
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+### 修复
+- 阿里系视频 CDN 对 h2 镜像腿的流级挂死：TTFB 守卫（30s 等响应头、头到即停表不伤长流）＋当场 h1 镜像腿完成本请求
+- GBK/空 body 解码失败降级原文直通（修 ERR_HTTP2_PROTOCOL_ERROR 连锁崩溃）
+- 客户端取消不再 panic 掐死整条入站连接
 
-Thank you for using Zen!
+### 引擎优化（相对 v3.1.7 引擎态，同机同列表同语料实测）
+- live 堆 **-18.7%**（166.6→135.4 MB）、装载峰值 **-58.9 MB**
+- 打包字节前缀（1 字节/token）＋反向索引强制择一分支集；判定面 133,212 请求黄金对拍逐位一致＋双引擎逐元素差分全绿
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+### 对比官方 v0.27.1（同机同列表同语料）
+- 匹配快 **4.0×**（540.5→134.8 µs）、XHR 3.6×、响应期改写 2.6×
+- 每请求分配少 **64×/119×**；驻留内存 **-10.2%** 且多装 9,490 条规则（官方解析静默丢弃 11,890 条）
+- 明细：docs/benchmarks/v3.1.8-vs-v0.27.1.md
+
+### EN
+- Fixed: alibaba CDN h2 leg stall (TTFB guard + h1 handoff), GBK/empty-body passthrough, client-cancel no longer aborts the inbound connection
+- Engine: live heap -18.7% vs previous state; packed byte prefixes + reverse-index alternation sets (golden-diff verified)
+- vs official v0.27.1: matching 4.0× faster, allocations 64×/119× fewer, resident -10.2% with 9,490 more rules loaded
+
+### 诚实基线 / Honest baseline
+- 内存/效率数字为引擎级基准（abbench 双 worktree 同字节 harness），非端到端带宽测试
+- 官方 v0.27.1 已含 TLS ClientHello 镜像（#819）；zen-plus 覆盖 TLS+h2 全层并含上游代理链
+- 官方装载更快（少解析 1.2 万条被其丢弃的规则）
 
 ## v0.25.0
 
