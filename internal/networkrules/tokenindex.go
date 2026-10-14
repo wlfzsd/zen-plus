@@ -131,18 +131,29 @@ func segmentsOfNode(r *syntax.Regexp) (segs []string, locked []bool) {
 // so branches are reconstructed recursively — see branchOneOf.
 func altTokens(ast *syntax.Regexp) []string {
 	var group *syntax.Regexp
+	var prefix string
 	switch ast.Op {
 	case syntax.OpAlternate:
 		group = ast
 	case syntax.OpConcat:
 		// Optional siblings impose nothing; the first MANDATORY alternate
 		// group yields a sound one-of set ("some branch of it must match").
-		for _, c := range ast.Sub {
-			if isMandatory(c) {
-				if g := altGroupOf(c); g != nil {
-					group = g
-					break
+		for i, c := range ast.Sub {
+			if !isMandatory(c) {
+				continue
+			}
+			if g := altGroupOf(c); g != nil {
+				group = g
+				// 2026-10-14: fold an immediately preceding mandatory literal
+				// sibling into every branch token ("."+(club|bid|…) yields
+				// ".club"/".bid"/…). Adjacent mandatory concat children match
+				// contiguously, so prefix+branch is still required verbatim.
+				if i > 0 {
+					if p, ok := literalRun(ast.Sub[i-1 : i]); ok && p != "" {
+						prefix = p
+					}
 				}
+				break
 			}
 		}
 	default:
@@ -157,7 +168,13 @@ func altTokens(ast *syntax.Regexp) []string {
 		if !ok {
 			return nil // some branch yields nothing: the set is not provable
 		}
-		out = append(out, ts...)
+		for _, t := range ts {
+			tok := prefix + t
+			if len(tok) > idxMaxTokenLen {
+				return nil // a folded token overflows: the set would be incomplete
+			}
+			out = append(out, tok)
+		}
 		if len(out) > idxMaxAltTokens {
 			return nil
 		}
@@ -165,7 +182,10 @@ func altTokens(ast *syntax.Regexp) []string {
 	return out
 }
 
-const idxMaxAltTokens = 64
+// 2026-10-14: 64→256 — wild TLD/path alternation lists carry dozens of
+// branches; the cap only bounds bucket memory and the per-candidate confirm
+// loop, both linear and small at this size.
+const idxMaxAltTokens = 256
 
 // branchOneOf returns tokens that every match through branch b must contain
 // (b is one branch of an alternate, so b's content is fully required). The
@@ -461,11 +481,30 @@ func (s *ruleStore[T]) buildIdx() *reIdx {
 					best, bestLocked, bestDF = sg, lk, d
 				}
 			}
-			// Case A normally wins. Exception: when the only caseA token is
-			// LOCKED (a fixed-offset scheme-prefix segment that occurs in
-			// every URL and prunes nothing) and a caseB one-of set exists,
-			// the alternation tokens are the better discriminator.
-			if best != "" && !(bestLocked && len(altSets[i]) > 0) {
+			// Case A vs Case B selection. Both predicates are sound (they
+			// only decide WHEN a skip is allowed), so the choice is purely
+			// about pruning power. Case A normally wins: a single rare
+			// segment is the cheapest confirm. Prefer the alternation set
+			// when the best caseA token cannot prune:
+			//   - it is LOCKED (a fixed-offset scheme-prefix segment that
+			//     occurs in every URL), or
+			//   - (2026-10-14) every branch token is rarer (lower df) than
+			//     the caseA best — scheme-ish unlocked tokens like "://"
+			//     carry high df precisely because they are universally
+			//     present in URLs, so the branch disjunction prunes more.
+			if best != "" && len(altSets[i]) > 0 {
+				setMaxDF := int32(-1)
+				for _, tok := range altSets[i] {
+					if d := df[tok]; d > setMaxDF {
+						setMaxDF = d
+					}
+				}
+				if !(bestLocked || setMaxDF < bestDF) {
+					idx.tokensOf[i] = []string{best}
+					addToken(int32(i), best) // #nosec G115 -- slice index
+					continue
+				}
+			} else if best != "" {
 				idx.tokensOf[i] = []string{best}
 				addToken(int32(i), best) // #nosec G115 -- slice index
 				continue
