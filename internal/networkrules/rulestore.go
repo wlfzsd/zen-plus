@@ -56,6 +56,11 @@ type ruleStore[T comparable] struct {
 	segIx   *segmatch.DATIndex
 	segOnce sync.Once
 
+	// treeGate（T1，2026-10-15）：树候选的 $domain 反向索引（WS1 第二期）。
+	// Compact 内构建（构建后不可变，并发读安全）；GetHosts 按位 O(1) 预滤
+	// 树候选的 $domain 必要条件。nil = 未构建（装载期）。
+	treeGate *treeGateIndex[T]
+
 	// resPool backs Get's result slices; the caller must putRes each result
 	// exactly once (2026-10-06).
 	resOnce sync.Once
@@ -272,6 +277,12 @@ func (s *ruleStore[T]) GetHosts(url string, eff *effHosts) []T {
 		res = append(res, s.segMatches(url)...)
 	}
 	res = s.appendHostMatches(res, url)
+	// T1（2026-10-15）：树候选的 $domain 必要条件位图预滤——语义零变化
+	// （被滤者必不匹配，见 treegate.go 可靠性注），调用方 ShouldMatchReqNav
+	// 对幸存者的完整评估不变。
+	if s.treeGate != nil {
+		res = s.treeGate.filterTree(res, eff)
+	}
 
 	if len(s.regexp) > 0 {
 		// fastShape gaps are position-free while an unflagged "." cannot

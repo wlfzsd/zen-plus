@@ -608,6 +608,11 @@ func (nr *NetworkRules) Compact() {
 	nr.applyCoverageDedup()
 	nr.primaryStore.Compact()
 	nr.exceptionStore.Compact()
+	// T1（2026-10-15）：树候选 $domain 反向索引——在 badfilter/覆盖去重/
+	// trimslice 全部收尾后构建（作用于最终规则集，构建后不可变）。
+	// 2026-10-15 修正：仅 primaryStore——exceptionStore 的 $domain 语义在
+	// Cancels 链路上与 eff(ref/own) 不完全同构（dump 红灯实锤），回退保守。
+	nr.primaryStore.buildTreeGate()
 	// Freeze (2026-10-13): from here on the stores are read-only for
 	// serving; ParseRule routes runtime exception inserts into liveExc.
 	nr.frozen.Store(true)
