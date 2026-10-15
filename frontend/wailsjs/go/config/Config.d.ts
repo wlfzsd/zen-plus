@@ -14,6 +14,8 @@ export function GetFilterLists():Promise<Array<config.FilterList>>;
 
 export function GetFilterListsByLocales(arg1:Array<string>):Promise<Array<config.FilterList>>;
 
+export function GetFilterUpdateIntervalHours():Promise<number>;
+
 export function GetFirstLaunch():Promise<boolean>;
 
 export function GetIgnoredHosts():Promise<Array<string>>;

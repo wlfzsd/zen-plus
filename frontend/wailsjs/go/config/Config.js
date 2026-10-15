@@ -26,6 +26,10 @@ export function GetFilterListsByLocales(arg1) {
   return window['go']['config']['Config']['GetFilterListsByLocales'](arg1);
 }
 
+export function GetFilterUpdateIntervalHours() {
+  return window['go']['config']['Config']['GetFilterUpdateIntervalHours']();
+}
+
 export function GetFirstLaunch() {
   return window['go']['config']['Config']['GetFirstLaunch']();
 }
