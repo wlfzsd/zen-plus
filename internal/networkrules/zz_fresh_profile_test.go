@@ -25,12 +25,12 @@ import (
 )
 
 var (
-	freshOnce     sync.Once
-	freshEngine   *networkrules.NetworkRules
-	freshErr      error
-	freshCorpus   []*http.Request
-	freshParsed   int
-	freshLoadMs   int64
+	freshOnce   sync.Once
+	freshEngine *networkrules.NetworkRules
+	freshErr    error
+	freshCorpus []*http.Request
+	freshParsed int
+	freshLoadMs int64
 )
 
 func freshLoad(tb testing.TB) {

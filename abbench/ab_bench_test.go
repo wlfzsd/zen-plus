@@ -9,10 +9,11 @@
 // 列表定义与用户 config.json filter.filterLists 的 13 个 enabled=true 条目一一对应。
 //
 // 环境变量：
-//   ZEN_FILTER_CACHE_DIR  过滤器缓存目录（默认 %LOCALAPPDATA%\Zen\filters）
-//   ZEN_AB_CORPUS         语料目录（urls.txt / obfusgated_probes.tsv / adtest_urls.txt）
-//   ZEN_AB_OUT            输出目录（memory/loadstats/parity TSV）
-//   ZEN_AB_TAG            版本标签（写入所有输出文件首列，防混淆）
+//
+//	ZEN_FILTER_CACHE_DIR  过滤器缓存目录（默认 %LOCALAPPDATA%\Zen\filters）
+//	ZEN_AB_CORPUS         语料目录（urls.txt / obfusgated_probes.tsv / adtest_urls.txt）
+//	ZEN_AB_OUT            输出目录（memory/loadstats/parity TSV）
+//	ZEN_AB_TAG            版本标签（写入所有输出文件首列，防混淆）
 //
 // 创建：2026-10-10（引擎对比测试任务）
 package abbench
@@ -28,11 +29,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/irbis-sh/zen-desktop/internal/asset"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules"
@@ -91,11 +94,11 @@ func isIgnoreLine(line string) bool {
 // ---- 装载 ----
 
 type loadStats struct {
-	lines        int         // 扫过的有效行
-	parseOK      int         // ParseRule 成功（进入网络规则引擎）
-	parseErr     int         // ParseRule 失败（被静默丢弃）
-	assetHandled int         // asset 引擎接管（scriptlet/cosmetic 等，含 asset 层报错）
-	dupSkipped   int         // 跨列表重复行跳过（与生产一致）
+	lines        int // 扫过的有效行
+	parseOK      int // ParseRule 成功（进入网络规则引擎）
+	parseErr     int // ParseRule 失败（被静默丢弃）
+	assetHandled int // asset 引擎接管（scriptlet/cosmetic 等，含 asset 层报错）
+	dupSkipped   int // 跨列表重复行跳过（与生产一致）
 	perList      map[string]*listStat
 }
 
@@ -117,6 +120,30 @@ func loadAll(tb testing.TB) (*networkrules.NetworkRules, *loadStats) {
 	st := &loadStats{perList: map[string]*listStat{}}
 	seen := map[string]struct{}{}
 	skipAdGuard := os.Getenv("ZEN_AB_SKIP_ADGUARD") == "1"
+	blobMode := os.Getenv("ZEN_AB_BLOB") == "1"
+	emit := func(l *realList, ls *listStat, line string) {
+		if isIgnoreLine(line) {
+			return
+		}
+		st.lines++
+		ls.lines++
+		handled, ierr := eng.AddRule(line, l.trusted)
+		if ierr != nil || handled {
+			st.assetHandled++
+			return
+		}
+		if _, dup := seen[line]; dup {
+			st.dupSkipped++
+			return
+		}
+		seen[line] = struct{}{}
+		if _, err := nr.ParseRule(line, &l.name); err != nil {
+			st.parseErr++
+			ls.errs++
+		} else {
+			st.parseOK++
+		}
+	}
 	for _, l := range realLists {
 		if skipAdGuard && strings.HasPrefix(l.name, "AdGuard") {
 			continue
@@ -129,31 +156,24 @@ func loadAll(tb testing.TB) (*networkrules.NetworkRules, *loadStats) {
 		}
 		ls := &listStat{}
 		st.perList[l.name] = ls
+		if blobMode {
+			// T1 零拷贝：data 为 ReadFile 独立分配且此后只读；
+			// 每行成为 blob 子串（无逐行拷贝），RawRule 回指 blob。
+			blob := unsafe.String(&data[0], len(data))
+			start := 0
+			for i := 0; i <= len(blob); i++ {
+				if i != len(blob) && blob[i] != '\n' {
+					continue
+				}
+				emit(&l, ls, strings.TrimSpace(blob[start:i]))
+				start = i + 1
+			}
+			continue
+		}
 		sc := bufio.NewScanner(strings.NewReader(string(data)))
 		sc.Buffer(nil, 1<<20)
 		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if isIgnoreLine(line) {
-				continue
-			}
-			st.lines++
-			ls.lines++
-			handled, ierr := eng.AddRule(line, l.trusted)
-			if ierr != nil || handled {
-				st.assetHandled++
-				continue
-			}
-			if _, dup := seen[line]; dup {
-				st.dupSkipped++
-				continue
-			}
-			seen[line] = struct{}{}
-			if _, err := nr.ParseRule(line, &l.name); err != nil {
-				st.parseErr++
-				ls.errs++
-			} else {
-				st.parseOK++
-			}
+			emit(&l, ls, strings.TrimSpace(sc.Text()))
 		}
 	}
 	nr.Compact()
@@ -358,7 +378,17 @@ func TestAbMemory(t *testing.T) {
 	<-done
 	runtime.GC()
 	runtime.GC()
+	// R5 探针（2026-10-15）：文本 arena 化 + 还堆，对比 heapSys 变化。
+	cov, abytes := nr.CompactTextArena()
+	runtime.GC()
+	runtime.GC()
+	// R4 实验（2026-10-15）：FreeOSMemory 把装载峰值预留的堆还给 OS——
+	// 对比 sysMB 前后差；若显著则生产装载完成后同样调用。
+	debug.FreeOSMemory()
 	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	runtime.KeepAlive(nr) // 防止引擎在 GC 测量前被判死回收（实测曾致 liveHeap=0.6MB 假象）
+	t.Logf("R5-ARENA: covered=%d arenaBytes=%.1fMB", cov, float64(abytes)/1048576)
 	runtime.ReadMemStats(&m)
 	runtime.KeepAlive(nr) // 防止引擎在 GC 测量前被判死回收（实测曾致 liveHeap=0.6MB 假象）
 	memFile := "memory.txt"

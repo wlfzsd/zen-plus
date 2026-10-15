@@ -9,6 +9,7 @@ import (
 
 	"github.com/irbis-sh/zen-desktop/internal/ruletree"
 	"github.com/irbis-sh/zen-desktop/internal/trimslice"
+	"github.com/irbis-sh/zen-desktop/segmatch"
 )
 
 // ruleStore matches URLs against ad-block style patterns with associated data.
@@ -44,6 +45,16 @@ type ruleStore[T comparable] struct {
 	// reads take hostMu.RLock.
 	hostMu    sync.RWMutex
 	hostRules map[string][]T
+
+	// litFirstPats[id] = 以字面量 id 为首段字面量的模式列表（倒排）——见 segmatch
+	// （本结构体不含该字段；以下为 v2-S6 字段）
+	// v2-S6: root-subtree patterns and their values (insertion order), with
+	// the segment automaton built at Compact time.
+	v2Root  bool
+	segPats []string
+	segVals []T
+	segIx   *segmatch.DATIndex
+	segOnce sync.Once
 
 	// resPool backs Get's result slices; the caller must putRes each result
 	// exactly once (2026-10-06).
@@ -86,7 +97,6 @@ func urlSepByte(c byte) bool {
 	}
 	return true
 }
-
 
 // domainGate is one rule's $domain condition in the form the per-request
 // eligibility pass can evaluate by host-suffix lookup (2026-10-14). It is
@@ -200,6 +210,20 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
 				return nil
 			}
 		}
+		// v2-S6 (2026-10-14): root-subtree patterns (no ||/| anchor) go to
+		// the segment automaton when v2Root is on — the 53.1% wildcard
+		// position enumeration is replaced by ordered segment merging.
+		// Default OFF; the switch is the rollback.
+		// 2026-10-15 用户裁定：前导通配/空首段模式（/*…、?*… 等 14 条）
+		// 的段编码语义有偏差 → 直接舍弃出 DAT，回退旧树精确匹配
+		// （树为无损兜底，0.11% 模式规模，其余 99.89% 模式已差分验证）。
+		if s.v2Root && !strings.ContainsAny(pattern, "|") {
+			s.loadMu.Lock()
+			s.segPats = append(s.segPats, pattern)
+			s.segVals = append(s.segVals, v)
+			s.loadMu.Unlock()
+			return nil
+		}
 		s.tree.Insert(pattern, v)
 	}
 
@@ -244,6 +268,9 @@ func (s *ruleStore[T]) GetHosts(url string, eff *effHosts) []T {
 	}
 	res = append(res, s.generic...)
 	res = append(res, matches...)
+	if s.v2Root {
+		res = append(res, s.segMatches(url)...)
+	}
 	res = s.appendHostMatches(res, url)
 
 	if len(s.regexp) > 0 {
@@ -309,6 +336,32 @@ func (s *ruleStore[T]) Compact() {
 	s.generic = trimslice.TrimSlice(s.generic)
 	s.regexp = trimslice.TrimSlice(s.regexp)
 	s.tree.Compact()
+	if s.v2Root && len(s.segPats) > 0 {
+		s.segOnce.Do(func() {
+			s.segIx = segmatch.NewDATIndex(s.segPats)
+		})
+	}
+}
+
+// segMatches 返回 root 类（段自动机）命中的值，插入序。
+// segIx 惰性构建（Compact 后首次匹配时；PruneValues 置 nil 后自动重建）。
+func (s *ruleStore[T]) segMatches(url string) []T {
+	if len(s.segPats) == 0 {
+		return nil
+	}
+	if s.segIx == nil {
+		s.segOnce.Do(func() {
+			s.segIx = segmatch.NewDATIndex(s.segPats)
+		})
+		if s.segIx == nil {
+			return nil
+		}
+	}
+	var out []T
+	for _, pi := range s.segIx.MatchAll(url) {
+		out = append(out, s.segVals[pi])
+	}
+	return out
 }
 
 // pruneValues removes every value for which drop reports true from the whole
@@ -322,6 +375,22 @@ func (s *ruleStore[T]) Compact() {
 // parent/child rule pair survived).
 func (s *ruleStore[T]) pruneValues(drop func(T) bool) int {
 	removed := s.tree.PruneValues(drop)
+	if s.v2Root && len(s.segVals) > 0 {
+		kept := s.segVals[:0]
+		keptP := s.segPats[:0]
+		for i, v := range s.segVals {
+			if drop(v) {
+				removed++
+				continue
+			}
+			kept = append(kept, v)
+			keptP = append(keptP, s.segPats[i])
+		}
+		s.segVals = kept
+		s.segPats = keptP
+		s.segIx = nil // 下次匹配前由 Compact 重建
+		s.segOnce = sync.Once{}
+	}
 	if !s.hostSplit || len(s.hostRules) == 0 {
 		return removed
 	}
@@ -416,7 +485,6 @@ func (s *ruleStore[T]) appendHostMatches(res []T, url string) []T {
 	return append(res, hostHits...)
 }
 
-
 // walkValues calls fn for every value stored in the store — the generic
 // slice, the regexp slice and the whole pattern tree — in no particular
 // order. Used once post-load by $badfilter application (networkrules.Compact,
@@ -427,6 +495,13 @@ func (s *ruleStore[T]) walkValues(fn func(T)) {
 	}
 	for i := range s.regexp {
 		fn(s.regexp[i].value)
+	}
+	if s.v2Root {
+		// v2-S6: segment-indexed rules are values like any other — $badfilter
+		// wiring and coverage dedup must reach them.
+		for _, v := range s.segVals {
+			fn(v)
+		}
 	}
 	if s.hostSplit {
 		// 方案A: hostname-indexed rules are values like any other — $badfilter

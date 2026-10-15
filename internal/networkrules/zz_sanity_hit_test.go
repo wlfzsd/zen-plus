@@ -42,7 +42,7 @@ func snLoad(tb testing.TB) {
 		name := "sanity"
 		for _, raw := range datas {
 			sc := bufio.NewScanner(bytes.NewReader(raw))
-			sc.Buffer(nil, 1 << 20)
+			sc.Buffer(nil, 1<<20)
 			for sc.Scan() {
 				line := strings.TrimSpace(sc.Text())
 				if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") || strings.HasPrefix(line, "#") {
@@ -59,7 +59,7 @@ func snLoad(tb testing.TB) {
 			return
 		}
 		sc := bufio.NewScanner(bytes.NewReader(raw2))
-		sc.Buffer(nil, 1 << 20)
+		sc.Buffer(nil, 1<<20)
 		for sc.Scan() {
 			u := strings.TrimSpace(sc.Text())
 			if u != "" {

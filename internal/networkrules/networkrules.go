@@ -74,6 +74,11 @@ type NetworkRules struct {
 	covE     []covRecException
 	// covTimeNanos 是最近一次去重阶段的耗时（resolve+prune，诊断用）。
 	covTimeNanos atomic.Int64
+
+	// domainGateOn controls the WS1 $domain regexp pre-filter (2026-10-14).
+	// Default true; WithDomainGate(false) or ZEN_AI_DOMAIN_GATE=0 restores
+	// the pre-WS1 query path exactly.
+	domainGateOn bool
 }
 
 // NetworkRulesOption customizes a NetworkRules at construction.
@@ -106,12 +111,33 @@ func WithHostSplit(enabled bool) NetworkRulesOption {
 	}
 }
 
+// WithDomainGate enables (default ON) the $domain eligibility pre-filter for
+// regexp rules (WS1, 2026-10-14, −26.21% ModifyReq measured). OFF makes
+// ModifyReq/ModifyRes call the ungated Get, reproducing the pre-WS1
+// behaviour exactly — the rollback switch for the pre-filter.
+func WithDomainGate(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) { nr.domainGateOn = enabled }
+}
+
+// WithV2Root enables (default OFF) the segment-automaton root class
+// (v2-S6, 2026-10-14): root-subtree patterns (no ||/| anchor) move out of
+// the pattern trie into a segment index — replacing the 53.1% wildcard
+// position enumeration. OFF = pre-v2 behaviour exactly.
+func WithV2Root(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) {
+		nr.primaryStore.v2Root = enabled
+		nr.exceptionStore.v2Root = enabled
+		nr.liveExc.store.v2Root = enabled
+	}
+}
+
 func New(opts ...NetworkRulesOption) *NetworkRules {
 	nr := &NetworkRules{
 		primaryStore:   newRuleStore[*rule.Rule](),
 		exceptionStore: newRuleStore[*exceptionrule.ExceptionRule](),
 		actionIdxOn:    true,
 		covOn:          true,
+		domainGateOn:   os.Getenv("ZEN_AI_DOMAIN_GATE") != "0",
 	}
 	nr.liveExc.store = newRuleStore[*exceptionrule.ExceptionRule]()
 	// $domain eligibility gates (2026-10-14): the store stays generic over
@@ -127,11 +153,17 @@ func New(opts ...NetworkRulesOption) *NetworkRules {
 	}
 	nr.modsInterner = newModsInterner()
 	nr.covArmed.Store(true)
-	// 方案A default from the environment (explicit options override): the
-	// pure-hostname index stays OFF unless opted in, so production behaviour
-	// is unchanged until it is enabled deliberately.
-	if os.Getenv("ZEN_AI_HOSTMAP") == "1" {
+	// 方案A (2026-10-15)：纯主机名索引默认开启——两轮实测背书：
+	// 等价性 PASS（zz_ai_hostmap_equiv，blockDiff=0）、CPU ±1.2% 噪声、
+	// 内存 −4.8MB（abbench live 130.7 vs 135.5，E1 实验）。ZEN_AI_HOSTMAP=0
+	// 显式回退；显式 option 仍优先于环境变量。
+	if os.Getenv("ZEN_AI_HOSTMAP") == "0" {
+		WithHostSplit(false)(nr)
+	} else {
 		WithHostSplit(true)(nr)
+	}
+	if os.Getenv("ZEN_V2_ROOT") == "1" {
+		WithV2Root(true)(nr)
 	}
 	for _, opt := range opts {
 		opt(nr)
@@ -211,8 +243,13 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	// semantics); hoist the two header reads out of the per-rule evaluation.
 	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
 
-	eff := effHostsOf(req)
-	storeRules := nr.primaryStore.GetHosts(reqURL, &eff)
+	var eff effHosts
+	effP := (*effHosts)(nil)
+	if nr.domainGateOn {
+		eff = effHostsOf(req)
+		effP = &eff
+	}
+	storeRules := nr.primaryStore.GetHosts(reqURL, effP)
 	defer nr.primaryStore.putRes(storeRules)
 	primaryRules, reqScratch := nr.prependIndexedReq(storeRules, req)
 	if reqScratch != nil {
@@ -227,7 +264,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	// Exceptions matching the request URL are judged per request (2026-10-08
 	// B2/H3): URL pattern hit plus the exception's own condition modifiers.
-	exceptions := nr.exceptionStore.GetHosts(reqURL, &eff)
+	exceptions := nr.exceptionStore.GetHosts(reqURL, effP)
 	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
@@ -384,8 +421,13 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	restrictFrames := nr.frameScopedRules.Load() > 0
 	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
 
-	eff := effHostsOf(req)
-	storeRules := nr.primaryStore.GetHosts(url, &eff)
+	var resEff effHosts
+	resEffP := (*effHosts)(nil)
+	if nr.domainGateOn {
+		resEff = effHostsOf(req)
+		resEffP = &resEff
+	}
+	storeRules := nr.primaryStore.GetHosts(url, resEffP)
 	defer nr.primaryStore.putRes(storeRules)
 	primaryRules, resScratch := nr.prependIndexedRes(storeRules, res)
 	if resScratch != nil {

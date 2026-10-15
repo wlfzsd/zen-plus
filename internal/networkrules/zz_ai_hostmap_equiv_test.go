@@ -151,6 +151,46 @@ func TestZZAIHostMapEquiv(t *testing.T) {
 		t.Fatalf("可观测决策差异: blockDiff=%d redirectDiff=%d（必须为 0）", blockDiff, redirDiff)
 	}
 
+	// ===== ModifyRes 路径等价（WS1 同样改了 ModifyRes 的 Get 调用）=====
+	resViolations, resDiff := 0, 0
+	for _, u := range aiCorpus {
+		r0 := reqOf(u)
+		r1 := reqOf(u)
+		if r0 == nil {
+			continue
+		}
+		mkRes := func(req *http.Request) *http.Response {
+			return &http.Response{StatusCode: 200, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+				Header: http.Header{}, Body: http.NoBody, Request: req}
+		}
+		res0 := mkRes(r0)
+		res0.Header.Set("Content-Type", "text/html; charset=utf-8")
+		res0.Header.Set("Server", "nginx")
+		res1 := mkRes(r1)
+		res1.Header.Set("Content-Type", "text/html; charset=utf-8")
+		res1.Header.Set("Server", "nginx")
+		m0, err0 := e0.ModifyRes(r0, res0)
+		m1, err1 := e1.ModifyRes(r1, res1)
+		k0 := make([]string, len(m0))
+		for i := range m0 {
+			k0[i] = m0[i].RawRule
+		}
+		k1 := make([]string, len(m1))
+		for i := range m1 {
+			k1[i] = m1[i].RawRule
+		}
+		if (err0 != nil) != (err1 != nil) || !sameMultiset(k0, k1) {
+			resDiff++
+		}
+		if len(k0) != len(k1) {
+			resViolations++
+		}
+	}
+	t.Logf("ModifyRes 等价: corpus=%d multisetDiff=%d lenDiff=%d（必须均为 0）", len(aiCorpus), resDiff, resViolations)
+	if resDiff != 0 || resViolations != 0 {
+		t.Fatalf("ModifyRes 路径存在差异: multisetDiff=%d lenDiff=%d", resDiff, resViolations)
+	}
+
 	// 抽出的主机名规则规模
 	e1s := e1.primaryStore
 	e1s.hostMu.RLock()
