@@ -1,0 +1,349 @@
+diff --git a/internal/networkrules/networkrules.go b/internal/networkrules/networkrules.go
+index a89f579..64a85e3 100644
+--- a/internal/networkrules/networkrules.go
++++ b/internal/networkrules/networkrules.go
+@@ -101,6 +101,17 @@ func New(opts ...NetworkRulesOption) *NetworkRules {
+ 		covOn:          true,
+ 	}
+ 	nr.liveExc.store = newRuleStore[*exceptionrule.ExceptionRule]()
++	// $domain eligibility gates (2026-10-14): the store stays generic over
++	// T, so the concrete per-type gate derivation is installed here.
++	nr.primaryStore.gateOf = func(r *rule.Rule) *domainGate {
++		return domainGateOf(r.AndConditionModifiers())
++	}
++	nr.exceptionStore.gateOf = func(er *exceptionrule.ExceptionRule) *domainGate {
++		return domainGateOf(er.AndConditionModifiers())
++	}
++	nr.liveExc.store.gateOf = func(er *exceptionrule.ExceptionRule) *domainGate {
++		return domainGateOf(er.AndConditionModifiers())
++	}
+ 	nr.modsInterner = newModsInterner()
+ 	nr.covArmed.Store(true)
+ 	for _, opt := range opts {
+@@ -109,6 +120,52 @@ func New(opts ...NetworkRulesOption) *NetworkRules {
+ 	return nr
+ }
+ 
++// domainGateOf derives a rule's $domain eligibility gate from its MANDATORY
++// (And) condition modifiers, or nil when the rule has no indexable gate
++// (2026-10-14).
++//
++// $domain is appended to the And set (rule.ParseModifiers), so the modifier
++// must match for the rule to apply at all — a positive entry hit is a
++// necessary condition. Modifiers whose entry list is not suffix-indexable
++// (regexp entries, "example.*" entries, all-negated lists) yield nil, i.e.
++// the rule stays unconditionally eligible: conservative, never wrong.
++func domainGateOf(mods []rulemodifiers.ConditionModifier) *domainGate {
++	for _, m := range mods {
++		dm, ok := m.(*rulemodifiers.DomainModifier)
++		if !ok {
++			continue
++		}
++		lits, indexable := dm.IndexableLiterals()
++		if !indexable {
++			return nil
++		}
++		return &domainGate{lits: lits, matchTarget: dm.MatchTargetDomain}
++	}
++	return nil
++}
++
++// effHostsOf derives the $domain effective-host context for req, mirroring
++// rulemodifiers.DomainModifier.matchReqSide: the referrer hostname, falling
++// back to the request's own hostname when the Referer header is absent. An
++// unparseable Referer makes every $domain condition false (usable=false).
++func effHostsOf(req *http.Request) effHosts {
++	var e effHosts
++	if req == nil || req.URL == nil {
++		return e
++	}
++	e.own = req.URL.Hostname()
++	if ref := req.Header.Get("Referer"); ref != "" {
++		h, ok := rulemodifiers.RefererHostname(ref)
++		if !ok {
++			return e // usable stays false
++		}
++		e.ref, e.usable = h, true
++		return e
++	}
++	e.ref, e.usable = e.own, true
++	return e
++}
++
+ // maxMatchURLLen (2026-10-08 P6): AdGuard truncates URLs to 4096 characters
+ // before matching — docs "Basic rules → Basic rule syntax", pattern bullet:
+ // "AdGuard truncates URLs to a length of 4096 characters in order to speed
+@@ -135,7 +192,8 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule,
+ 	// semantics); hoist the two header reads out of the per-rule evaluation.
+ 	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
+ 
+-	storeRules := nr.primaryStore.Get(reqURL)
++	eff := effHostsOf(req)
++	storeRules := nr.primaryStore.GetHosts(reqURL, &eff)
+ 	defer nr.primaryStore.putRes(storeRules)
+ 	primaryRules, reqScratch := nr.prependIndexedReq(storeRules, req)
+ 	if reqScratch != nil {
+@@ -150,7 +208,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule,
+ 
+ 	// Exceptions matching the request URL are judged per request (2026-10-08
+ 	// B2/H3): URL pattern hit plus the exception's own condition modifiers.
+-	exceptions := nr.exceptionStore.Get(reqURL)
++	exceptions := nr.exceptionStore.GetHosts(reqURL, &eff)
+ 	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
+ 	defer nr.exceptionStore.putRes(exceptions)
+ 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
+@@ -307,7 +365,8 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
+ 	restrictFrames := nr.frameScopedRules.Load() > 0
+ 	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
+ 
+-	storeRules := nr.primaryStore.Get(url)
++	eff := effHostsOf(req)
++	storeRules := nr.primaryStore.GetHosts(url, &eff)
+ 	defer nr.primaryStore.putRes(storeRules)
+ 	primaryRules, resScratch := nr.prependIndexedRes(storeRules, res)
+ 	if resScratch != nil {
+diff --git a/internal/networkrules/rulemodifiers/domain.go b/internal/networkrules/rulemodifiers/domain.go
+index c875747..76f79cf 100644
+--- a/internal/networkrules/rulemodifiers/domain.go
++++ b/internal/networkrules/rulemodifiers/domain.go
+@@ -98,6 +98,43 @@ func (m *DomainModifier) HasPermittedDomains() bool {
+ 	return false
+ }
+ 
++// IndexableLiterals returns the modifier's non-negated literal entries when
++// the whole entry list can be pre-filtered by host-suffix lookup, plus
++// ok=true. ok=false means the caller must treat the modifier as
++// non-indexable (every host stays eligible) — returned for regexp entries,
++// "example.*" effective-TLD entries, an empty list, and lists with no
++// non-negated entry at all.
++//
++// Soundness (2026-10-14, domain-gate pre-filter): matchHost(hostname)
++// requires at least one non-negated entry to hit whenever the list HAS a
++// non-negated entry (matchHost: `permitted || !hasPermitted`), and a plain
++// entry hits exactly when hostname equals it or ends with "."+entry
++// (domainModifierEntry.MatchDomain). So "hostname's suffix chain intersects
++// lits" is a NECESSARY condition for the modifier to match. Rules carrying
++// $domain sit in the mandatory And set (rule.ParseModifiers), so a rule
++// failing this test can never match — skipping it changes no outcome.
++func (m *DomainModifier) IndexableLiterals() (lits []string, ok bool) {
++	if len(m.entries) == 0 {
++		return nil, false
++	}
++	for i := range m.entries {
++		e := &m.entries[i]
++		if e.inverted {
++			continue
++		}
++		// A non-negated entry that is not a plain domain is a regexp or an
++		// "example.*" TLD entry: not suffix-indexable.
++		if e.regular == "" {
++			return nil, false
++		}
++		lits = append(lits, e.regular)
++	}
++	if len(lits) == 0 {
++		return nil, false // all-negated list is vacuously true
++	}
++	return lits, true
++}
++
+ func (m *DomainModifier) Parse(modifier string) error {
+ 	eqIndex := strings.IndexByte(modifier, '=')
+ 	if eqIndex == -1 || eqIndex == len(modifier)-1 {
+diff --git a/internal/networkrules/rulestore.go b/internal/networkrules/rulestore.go
+index 16f7cc0..85f3cd6 100644
+--- a/internal/networkrules/rulestore.go
++++ b/internal/networkrules/rulestore.go
+@@ -26,12 +26,41 @@ type ruleStore[T comparable] struct {
+ 	// tokenindex.go). Insert invalidates it; the next Get rebuilds it.
+ 	idx atomic.Pointer[reIdx]
+ 
++	// gateOf derives a rule's $domain eligibility gate (nil = no gate).
++	// The owner (networkrules.New) installs the concrete per-type function;
++	// ruleStore itself stays generic over T. (2026-10-14)
++	gateOf func(T) *domainGate
++
+ 	// resPool backs Get's result slices; the caller must putRes each result
+ 	// exactly once (2026-10-06).
+ 	resOnce sync.Once
+ 	resPool sync.Pool
+ }
+ 
++// domainGate is one rule's $domain condition in the form the per-request
++// eligibility pass can evaluate by host-suffix lookup (2026-10-14). It is
++// built once per rule in buildIdx from the rule's MANDATORY (And) condition
++// modifiers: $domain is appended to the And set (rule.ParseModifiers), so a
++// rule whose gate cannot be satisfied by the request host can never match.
++type domainGate struct {
++	// lits are the modifier's non-negated literal entries
++	// (rulemodifiers.DomainModifier.IndexableLiterals).
++	lits []string
++	// matchTarget mirrors DomainModifier.MatchTargetDomain: the condition
++	// also tests the request's own hostname, not only the referrer's.
++	matchTarget bool
++}
++
++// effHosts is the per-request effective-host pair that the $domain condition
++// tests (rulemodifiers.DomainModifier.matchReqSide): the referrer hostname,
++// falling back to the target hostname when no Referer header is present.
++// usable=false means an unparseable Referer, for which matchReqSide returns
++// false for every rule, so no gated rule is eligible.
++type effHosts struct {
++	ref, own string
++	usable   bool
++}
++
+ type regexpRule[T comparable] struct {
+ 	regexp *regexp.Regexp
+ 	// fast is an exact-equivalence matcher for supported pattern shapes
+@@ -115,7 +144,26 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
+ // matching regexp rules, in insertion order per bucket. The result slice's
+ // backing comes from a pool: the caller must call putRes exactly once and
+ // must not retain the backing (values must be copied out first).
++//
++// Get is the ungated form (no $domain pre-filter); it is equivalent to
++// GetHosts(url, nil) and is kept for callers without a request context
++// (tests, tools).
+ func (s *ruleStore[T]) Get(url string) []T {
++	return s.GetHosts(url, nil)
++}
++
++// GetHosts is Get with the per-request $domain eligibility context
++// (2026-10-14). eff==nil disables the pre-filter, which reproduces the
++// pre-change behaviour exactly.
++//
++// The pre-filter is semantics-preserving for every caller that afterwards
++// drops non-matching rules through the rule's condition modifiers
++// (NetworkRules.ModifyReq's ShouldMatchReqNav filter and ModifyRes's
++// ShouldMatchRes filter): $domain is a mandatory (And) condition, so a rule
++// whose gate cannot be satisfied by eff is discarded either way. Candidate
++// ORDER is unchanged — the loop still walks the regexp slice in insertion
++// order and only skips rules that could not have survived.
++func (s *ruleStore[T]) GetHosts(url string, eff *effHosts) []T {
+ 	matches := s.tree.GetLP(url)
+ 
+ 	s.resOnce.Do(func() {
+@@ -149,9 +197,17 @@ func (s *ruleStore[T]) Get(url string) []T {
+ 			// Rarest-token reverse index: a rule whose provably-required
+ 			// literal cannot be present in url is skipped without running
+ 			// its regexp (zero false negatives; see tokenindex.go).
++			// The $domain eligibility pass runs first: a rule whose
++			// mandatory $domain condition cannot hold for this request is
++			// skipped before its regexp too (2026-10-14).
+ 			var hit hitBits
+ 			idx.markCandidates(url, &hit)
++			var elig hitBits
++			idx.markEligible(eff, &elig)
+ 			for i := range s.regexp {
++				if elig[i/64]&(1<<(i%64)) == 0 {
++					continue
++				}
+ 				if toks := idx.tokensOf[i]; len(toks) > 0 {
+ 					if hit[i/64]&(1<<(i%64)) == 0 {
+ 						continue
+diff --git a/internal/networkrules/tokenindex.go b/internal/networkrules/tokenindex.go
+index 7be6a33..df184f8 100644
+--- a/internal/networkrules/tokenindex.go
++++ b/internal/networkrules/tokenindex.go
+@@ -45,6 +45,20 @@ type reIdx struct {
+ 	// buckets[k] maps the k-byte window (k=2,3,4) of a token to the rule
+ 	// indices indexed under tokens whose first k bytes equal the window.
+ 	buckets [5]map[uint32][]int32
++
++	// --- $domain eligibility index (2026-10-14) ---
++	// alwaysElig holds every rule with no indexable $domain gate (no
++	// $domain at all, or a gate that cannot be suffix-indexed). Bits at or
++	// beyond len(regexp) are set but never read.
++	alwaysElig hitBits
++	// byDomainRef maps a positive literal $domain entry to the rule indices
++	// whose gate tests the referrer hostname only.
++	byDomainRef map[string][]int32
++	// byDomainAny is the same for gates that also test the target hostname
++	// (DomainModifier.MatchTargetDomain).
++	byDomainAny map[string][]int32
++	// hasGate is true when at least one rule carries an indexable gate.
++	hasGate bool
+ }
+ 
+ const (
+@@ -531,9 +545,79 @@ func (s *ruleStore[T]) buildIdx() *reIdx {
+ 			addToken(int32(i), tok) // #nosec G115 -- slice index
+ 		}
+ 	}
++	// 4) $domain eligibility gates (2026-10-14): every rule is eligible by
++	//    default; a rule whose gate is suffix-indexable is removed from
++	//    alwaysElig and registered under each of its positive literal
++	//    entries. markEligible then re-admits it for requests whose
++	//    effective host matches one of those entries.
++	for i := range idx.alwaysElig {
++		idx.alwaysElig[i] = ^uint64(0)
++	}
++	if s.gateOf != nil {
++		for i := range s.regexp {
++			g := s.gateOf(s.regexp[i].value)
++			if g == nil || len(g.lits) == 0 {
++				continue // no gate, or non-indexable: always eligible
++			}
++			idx.hasGate = true
++			idx.alwaysElig[i/64] &^= 1 << (i % 64) // #nosec G115 -- slice index
++			m := &idx.byDomainRef
++			if g.matchTarget {
++				m = &idx.byDomainAny
++			}
++			if *m == nil {
++				*m = make(map[string][]int32, len(g.lits))
++			}
++			for _, l := range g.lits {
++				(*m)[l] = append((*m)[l], int32(i)) // #nosec G115 -- slice index
++			}
++		}
++	}
+ 	return idx
+ }
+ 
++// markEligible fills elig with the regexp rules whose mandatory $domain gate
++// can be satisfied by this request (2026-10-14). eff==nil disables the
++// pre-filter: every rule is eligible, exactly reproducing the pre-change
++// behaviour.
++//
++// Host matching mirrors rulemodifiers.DomainModifier.matchReqSide: a plain
++// entry matches the host itself or any subdomain, so the host's whole suffix
++// chain is looked up ("a.b.example.com" -> "a.b.example.com", "b.example.com",
++// "example.com", "com"). Referrer-only gates use eff.ref; MatchTargetDomain
++// gates additionally accept eff.own. An unparseable Referer makes
++// matchReqSide false for every rule, so only always-eligible rules survive.
++func (idx *reIdx) markEligible(eff *effHosts, elig *hitBits) {
++	if eff == nil {
++		for i := range elig {
++			elig[i] = ^uint64(0)
++		}
++		return
++	}
++	*elig = idx.alwaysElig
++	if !idx.hasGate || !eff.usable {
++		return
++	}
++	add := func(m map[string][]int32, host string) {
++		if len(m) == 0 || host == "" {
++			return
++		}
++		for h := host; h != ""; {
++			for _, id := range m[h] {
++				elig[id/64] |= 1 << (id % 64)
++			}
++			i := strings.IndexByte(h, '.')
++			if i < 0 {
++				break
++			}
++			h = h[i+1:]
++		}
++	}
++	add(idx.byDomainRef, eff.ref)
++	add(idx.byDomainAny, eff.ref)
++	add(idx.byDomainAny, eff.own)
++}
++
+ // kgramOf packs the first k bytes of s.
+ func kgramOf(s string, k int) uint32 {
+ 	switch k {
+
