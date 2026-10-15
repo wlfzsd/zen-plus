@@ -9,6 +9,7 @@ import (
 
 	"github.com/irbis-sh/zen-desktop/internal/ruletree"
 	"github.com/irbis-sh/zen-desktop/internal/trimslice"
+	"github.com/irbis-sh/zen-desktop/segmatch"
 )
 
 // ruleStore matches URLs against ad-block style patterns with associated data.
@@ -26,10 +27,104 @@ type ruleStore[T comparable] struct {
 	// tokenindex.go). Insert invalidates it; the next Get rebuilds it.
 	idx atomic.Pointer[reIdx]
 
+	// gateOf derives a rule's $domain eligibility gate (nil = no gate).
+	// The owner (networkrules.New) installs the concrete per-type function;
+	// ruleStore itself stays generic over T. (2026-10-14)
+	gateOf func(T) *domainGate
+
+	// hostSplit enables the pure-hostname index (2026-10-14 方案A): patterns
+	// of the exact shape ||host^ (no wildcard/anchor/separator/path inside)
+	// are held in hostRules instead of the pattern tree, and matched per
+	// request by host-segment suffix lookups (see GetHosts). Default OFF —
+	// the flag is the rollback switch; production enablement is a separate
+	// decision after set-equality verification.
+	hostSplit bool
+	// hostRules maps the pattern's host text to its rules in insertion
+	// order. Writes serialize on hostMu (list loading runs on parallel
+	// goroutines, and the live exception store inserts while serving);
+	// reads take hostMu.RLock.
+	hostMu    sync.RWMutex
+	hostRules map[string][]T
+
+	// litFirstPats[id] = 以字面量 id 为首段字面量的模式列表（倒排）——见 segmatch
+	// （本结构体不含该字段；以下为 v2-S6 字段）
+	// v2-S6: root-subtree patterns and their values (insertion order), with
+	// the segment automaton built at Compact time.
+	v2Root  bool
+	segPats []string
+	segVals []T
+	segIx   *segmatch.DATIndex
+	segOnce sync.Once
+
+	// treeGate（T1，2026-10-15）：树候选的 $domain 反向索引（WS1 第二期）。
+	// Compact 内构建（构建后不可变，并发读安全）；GetHosts 按位 O(1) 预滤
+	// 树候选的 $domain 必要条件。nil = 未构建（装载期）。
+	treeGate *treeGateIndex[T]
+
 	// resPool backs Get's result slices; the caller must putRes each result
 	// exactly once (2026-10-06).
 	resOnce sync.Once
 	resPool sync.Pool
+}
+
+// pureHostPattern reports whether pattern is exactly ||host^ — a domain
+// boundary, a host with no wildcard/anchor/extra separator/path segment, and
+// a trailing separator token. For such patterns the tree semantics reduce
+// exactly to "the request URL's host segment equals host or ends with
+// "."+host" (see GetHosts for the visit-point equivalence argument), which
+// the hostname index can evaluate without the trie.
+func pureHostPattern(pattern string) (host string, ok bool) {
+	if len(pattern) < 4 || pattern[0] != '|' || pattern[1] != '|' || pattern[len(pattern)-1] != '^' {
+		return "", false
+	}
+	h := pattern[2 : len(pattern)-1]
+	if h == "" {
+		return "", false
+	}
+	for i := 0; i < len(h); i++ {
+		switch h[i] {
+		case '*', '^', '|', '/', '$':
+			return "", false
+		}
+	}
+	return h, true
+}
+
+// urlSepByte mirrors the tree's tokenSeparator semantics (tokenize.go:10-12):
+// "^" matches any character except a letter, digit, or _-.%, and matches the
+// end of the address.
+func urlSepByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return false
+	case c == '_', c == '-', c == '.', c == '%':
+		return false
+	}
+	return true
+}
+
+// domainGate is one rule's $domain condition in the form the per-request
+// eligibility pass can evaluate by host-suffix lookup (2026-10-14). It is
+// built once per rule in buildIdx from the rule's MANDATORY (And) condition
+// modifiers: $domain is appended to the And set (rule.ParseModifiers), so a
+// rule whose gate cannot be satisfied by the request host can never match.
+type domainGate struct {
+	// lits are the modifier's non-negated literal entries
+	// (rulemodifiers.DomainModifier.IndexableLiterals).
+	lits []string
+	// matchTarget mirrors DomainModifier.MatchTargetDomain: the condition
+	// also tests the request's own hostname, not only the referrer's.
+	matchTarget bool
+}
+
+// effHosts is the per-request effective-host pair that the $domain condition
+// tests (rulemodifiers.DomainModifier.matchReqSide): the referrer hostname,
+// falling back to the target hostname when no Referer header is present.
+// usable=false means an unparseable Referer, for which matchReqSide returns
+// false for every rule, so no gated rule is eligible.
+type effHosts struct {
+	ref, own string
+	usable   bool
 }
 
 type regexpRule[T comparable] struct {
@@ -105,6 +200,35 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
 		s.idx.Store(nil)
 		s.loadMu.Unlock()
 	default:
+		// 方案A (2026-10-14): pure ||host^ patterns go to the hostname
+		// index instead of the trie when hostSplit is on. The host text is
+		// kept byte-exact — the tree stores the same bytes, so case and
+		// IDN handling stay identical.
+		if s.hostSplit {
+			if host, ok := pureHostPattern(pattern); ok {
+				s.hostMu.Lock()
+				if s.hostRules == nil {
+					s.hostRules = make(map[string][]T)
+				}
+				s.hostRules[host] = append(s.hostRules[host], v)
+				s.hostMu.Unlock()
+				return nil
+			}
+		}
+		// v2-S6 (2026-10-14): root-subtree patterns (no ||/| anchor) go to
+		// the segment automaton when v2Root is on — the 53.1% wildcard
+		// position enumeration is replaced by ordered segment merging.
+		// Default OFF; the switch is the rollback.
+		// 2026-10-15 用户裁定：前导通配/空首段模式（/*…、?*… 等 14 条）
+		// 的段编码语义有偏差 → 直接舍弃出 DAT，回退旧树精确匹配
+		// （树为无损兜底，0.11% 模式规模，其余 99.89% 模式已差分验证）。
+		if s.v2Root && !strings.ContainsAny(pattern, "|") {
+			s.loadMu.Lock()
+			s.segPats = append(s.segPats, pattern)
+			s.segVals = append(s.segVals, v)
+			s.loadMu.Unlock()
+			return nil
+		}
 		s.tree.Insert(pattern, v)
 	}
 
@@ -115,7 +239,26 @@ func (s *ruleStore[T]) Insert(pattern string, v T) error {
 // matching regexp rules, in insertion order per bucket. The result slice's
 // backing comes from a pool: the caller must call putRes exactly once and
 // must not retain the backing (values must be copied out first).
+//
+// Get is the ungated form (no $domain pre-filter); it is equivalent to
+// GetHosts(url, nil) and is kept for callers without a request context
+// (tests, tools).
 func (s *ruleStore[T]) Get(url string) []T {
+	return s.GetHosts(url, nil)
+}
+
+// GetHosts is Get with the per-request $domain eligibility context
+// (2026-10-14). eff==nil disables the pre-filter, which reproduces the
+// pre-change behaviour exactly.
+//
+// The pre-filter is semantics-preserving for every caller that afterwards
+// drops non-matching rules through the rule's condition modifiers
+// (NetworkRules.ModifyReq's ShouldMatchReqNav filter and ModifyRes's
+// ShouldMatchRes filter): $domain is a mandatory (And) condition, so a rule
+// whose gate cannot be satisfied by eff is discarded either way. Candidate
+// ORDER is unchanged — the loop still walks the regexp slice in insertion
+// order and only skips rules that could not have survived.
+func (s *ruleStore[T]) GetHosts(url string, eff *effHosts) []T {
 	matches := s.tree.GetLP(url)
 
 	s.resOnce.Do(func() {
@@ -130,6 +273,16 @@ func (s *ruleStore[T]) Get(url string) []T {
 	}
 	res = append(res, s.generic...)
 	res = append(res, matches...)
+	if s.v2Root {
+		res = append(res, s.segMatches(url)...)
+	}
+	res = s.appendHostMatches(res, url)
+	// T1（2026-10-15）：树候选的 $domain 必要条件位图预滤——语义零变化
+	// （被滤者必不匹配，见 treegate.go 可靠性注），调用方 ShouldMatchReqNav
+	// 对幸存者的完整评估不变。
+	if s.treeGate != nil {
+		res = s.treeGate.filterTree(res, eff)
+	}
 
 	if len(s.regexp) > 0 {
 		// fastShape gaps are position-free while an unflagged "." cannot
@@ -149,9 +302,17 @@ func (s *ruleStore[T]) Get(url string) []T {
 			// Rarest-token reverse index: a rule whose provably-required
 			// literal cannot be present in url is skipped without running
 			// its regexp (zero false negatives; see tokenindex.go).
+			// The $domain eligibility pass runs first: a rule whose
+			// mandatory $domain condition cannot hold for this request is
+			// skipped before its regexp too (2026-10-14).
 			var hit hitBits
 			idx.markCandidates(url, &hit)
+			var elig hitBits
+			idx.markEligible(eff, &elig)
 			for i := range s.regexp {
+				if elig[i/64]&(1<<(i%64)) == 0 {
+					continue
+				}
 				if toks := idx.tokensOf[i]; len(toks) > 0 {
 					if hit[i/64]&(1<<(i%64)) == 0 {
 						continue
@@ -186,6 +347,153 @@ func (s *ruleStore[T]) Compact() {
 	s.generic = trimslice.TrimSlice(s.generic)
 	s.regexp = trimslice.TrimSlice(s.regexp)
 	s.tree.Compact()
+	if s.v2Root && len(s.segPats) > 0 {
+		s.segOnce.Do(func() {
+			s.segIx = segmatch.NewDATIndex(s.segPats)
+		})
+	}
+}
+
+// segMatches 返回 root 类（段自动机）命中的值，插入序。
+// segIx 惰性构建（Compact 后首次匹配时；PruneValues 置 nil 后自动重建）。
+func (s *ruleStore[T]) segMatches(url string) []T {
+	if len(s.segPats) == 0 {
+		return nil
+	}
+	if s.segIx == nil {
+		s.segOnce.Do(func() {
+			s.segIx = segmatch.NewDATIndex(s.segPats)
+		})
+		if s.segIx == nil {
+			return nil
+		}
+	}
+	var out []T
+	for _, pi := range s.segIx.MatchAll(url) {
+		out = append(out, s.segVals[pi])
+	}
+	return out
+}
+
+// pruneValues removes every value for which drop reports true from the whole
+// store — tree leaves, hostname-index rules and (for completeness) the
+// generic/regexp buckets' shared-slice membership is handled by their owners.
+// It returns the number of removed values. Post-load pruning passes
+// ($badfilter wiring, coverage dedup) must go through this method instead of
+// tree.PruneValues directly, or they would silently miss 方案A-indexed rules
+// (found by the 2026-10-14 equivalence probe: coverage-dedup pruned the tree
+// copy but left the hostname-index copy alive, flipping which of a
+// parent/child rule pair survived).
+func (s *ruleStore[T]) pruneValues(drop func(T) bool) int {
+	removed := s.tree.PruneValues(drop)
+	if s.v2Root && len(s.segVals) > 0 {
+		kept := s.segVals[:0]
+		keptP := s.segPats[:0]
+		for i, v := range s.segVals {
+			if drop(v) {
+				removed++
+				continue
+			}
+			kept = append(kept, v)
+			keptP = append(keptP, s.segPats[i])
+		}
+		s.segVals = kept
+		s.segPats = keptP
+		s.segIx = nil // 下次匹配前由 Compact 重建
+		s.segOnce = sync.Once{}
+	}
+	if !s.hostSplit || len(s.hostRules) == 0 {
+		return removed
+	}
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	for host, vals := range s.hostRules {
+		kept := vals[:0]
+		for _, v := range vals {
+			if drop(v) {
+				removed++
+				continue
+			}
+			kept = append(kept, v)
+		}
+		if len(kept) == 0 {
+			delete(s.hostRules, host)
+		} else {
+			s.hostRules[host] = kept
+		}
+	}
+	return removed
+}
+
+// appendHostMatches appends the pure-hostname rules (方案A) whose pattern
+// matches url, in the exact order the tree traversal would have produced
+// them for these rules.
+//
+// Equivalence to the tree (ruletree.go:394-413): domain-boundary patterns
+// are only ever visited at (a) the host start and (b) positions right after
+// a dot that lies inside the host span — the same two visit families, in
+// the same order, are enumerated here. At a visit offset v the tree walks
+// the pattern bytes against url[v:]; a pure ||host^ pattern can only match
+// when host equals url[v:w] where w is the FIRST separator-or-end position
+// at/after v (the pattern text holds no separator bytes, and the trailing
+// "^" must consume exactly the byte at w), so each visit point yields at
+// most one candidate host string — a single map lookup. The hostSpan bound
+// and the hostStart/hostEnd formulas mirror GetLP verbatim.
+func (s *ruleStore[T]) appendHostMatches(res []T, url string) []T {
+	if !s.hostSplit || len(s.hostRules) == 0 {
+		return res
+	}
+	schemeEnd := strings.Index(url, "://")
+	hostStart := schemeEnd + 3
+	if hostStart < 0 || hostStart >= len(url) {
+		return res
+	}
+	hostEnd := strings.IndexAny(url[hostStart:], "/?")
+
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+
+	var hostHits []T
+	addVisit := func(v int) {
+		if v <= 0 || v >= len(url) {
+			return
+		}
+		w := v
+		for w < len(url) && !urlSepByte(url[w]) {
+			w++
+		}
+		if w == v {
+			return // separator at v: no host text can start here
+		}
+		for _, val := range s.hostRules[url[v:w]] {
+			dup := false
+			for _, prev := range hostHits {
+				if prev == val {
+					dup = true
+					break
+				}
+			}
+			if !dup { // same first-occurrence dedup as the tree traversal
+				hostHits = append(hostHits, val)
+			}
+		}
+	}
+	// (a) host start — mirrors GetLP's `if i == hostStart` visit.
+	addVisit(hostStart)
+	// (b) after each dot inside the host span — mirrors GetLP's dot visit,
+	// bounded by hostEnd exactly as there (IndexAny over "/?").
+	for i := hostStart + 1; i < len(url); i++ {
+		if hostEnd != -1 && i >= hostStart+hostEnd {
+			break
+		}
+		if url[i] == '.' {
+			addVisit(i + 1)
+		}
+	}
+	if len(hostHits) == 0 {
+		return res
+	}
+	return append(res, hostHits...)
 }
 
 // walkValues calls fn for every value stored in the store — the generic
@@ -198,6 +506,24 @@ func (s *ruleStore[T]) walkValues(fn func(T)) {
 	}
 	for i := range s.regexp {
 		fn(s.regexp[i].value)
+	}
+	if s.v2Root {
+		// v2-S6: segment-indexed rules are values like any other — $badfilter
+		// wiring and coverage dedup must reach them.
+		for _, v := range s.segVals {
+			fn(v)
+		}
+	}
+	if s.hostSplit {
+		// 方案A: hostname-indexed rules are values like any other — $badfilter
+		// disablement must reach them exactly as it reaches tree leaves.
+		s.hostMu.RLock()
+		for _, vals := range s.hostRules {
+			for _, v := range vals {
+				fn(v)
+			}
+		}
+		s.hostMu.RUnlock()
 	}
 	s.tree.Walk(fn)
 }

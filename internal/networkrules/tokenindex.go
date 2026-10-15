@@ -45,6 +45,20 @@ type reIdx struct {
 	// buckets[k] maps the k-byte window (k=2,3,4) of a token to the rule
 	// indices indexed under tokens whose first k bytes equal the window.
 	buckets [5]map[uint32][]int32
+
+	// --- $domain eligibility index (2026-10-14) ---
+	// alwaysElig holds every rule with no indexable $domain gate (no
+	// $domain at all, or a gate that cannot be suffix-indexed). Bits at or
+	// beyond len(regexp) are set but never read.
+	alwaysElig hitBits
+	// byDomainRef maps a positive literal $domain entry to the rule indices
+	// whose gate tests the referrer hostname only.
+	byDomainRef map[string][]int32
+	// byDomainAny is the same for gates that also test the target hostname
+	// (DomainModifier.MatchTargetDomain).
+	byDomainAny map[string][]int32
+	// hasGate is true when at least one rule carries an indexable gate.
+	hasGate bool
 }
 
 const (
@@ -531,7 +545,77 @@ func (s *ruleStore[T]) buildIdx() *reIdx {
 			addToken(int32(i), tok) // #nosec G115 -- slice index
 		}
 	}
+	// 4) $domain eligibility gates (2026-10-14): every rule is eligible by
+	//    default; a rule whose gate is suffix-indexable is removed from
+	//    alwaysElig and registered under each of its positive literal
+	//    entries. markEligible then re-admits it for requests whose
+	//    effective host matches one of those entries.
+	for i := range idx.alwaysElig {
+		idx.alwaysElig[i] = ^uint64(0)
+	}
+	if s.gateOf != nil {
+		for i := range s.regexp {
+			g := s.gateOf(s.regexp[i].value)
+			if g == nil || len(g.lits) == 0 {
+				continue // no gate, or non-indexable: always eligible
+			}
+			idx.hasGate = true
+			idx.alwaysElig[i/64] &^= 1 << (i % 64) // #nosec G115 -- slice index
+			m := &idx.byDomainRef
+			if g.matchTarget {
+				m = &idx.byDomainAny
+			}
+			if *m == nil {
+				*m = make(map[string][]int32, len(g.lits))
+			}
+			for _, l := range g.lits {
+				(*m)[l] = append((*m)[l], int32(i)) // #nosec G115 -- slice index
+			}
+		}
+	}
 	return idx
+}
+
+// markEligible fills elig with the regexp rules whose mandatory $domain gate
+// can be satisfied by this request (2026-10-14). eff==nil disables the
+// pre-filter: every rule is eligible, exactly reproducing the pre-change
+// behaviour.
+//
+// Host matching mirrors rulemodifiers.DomainModifier.matchReqSide: a plain
+// entry matches the host itself or any subdomain, so the host's whole suffix
+// chain is looked up ("a.b.example.com" -> "a.b.example.com", "b.example.com",
+// "example.com", "com"). Referrer-only gates use eff.ref; MatchTargetDomain
+// gates additionally accept eff.own. An unparseable Referer makes
+// matchReqSide false for every rule, so only always-eligible rules survive.
+func (idx *reIdx) markEligible(eff *effHosts, elig *hitBits) {
+	if eff == nil {
+		for i := range elig {
+			elig[i] = ^uint64(0)
+		}
+		return
+	}
+	*elig = idx.alwaysElig
+	if !idx.hasGate || !eff.usable {
+		return
+	}
+	add := func(m map[string][]int32, host string) {
+		if len(m) == 0 || host == "" {
+			return
+		}
+		for h := host; h != ""; {
+			for _, id := range m[h] {
+				elig[id/64] |= 1 << (id % 64)
+			}
+			i := strings.IndexByte(h, '.')
+			if i < 0 {
+				break
+			}
+			h = h[i+1:]
+		}
+	}
+	add(idx.byDomainRef, eff.ref)
+	add(idx.byDomainAny, eff.ref)
+	add(idx.byDomainAny, eff.own)
 }
 
 // kgramOf packs the first k bytes of s.

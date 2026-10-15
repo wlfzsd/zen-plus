@@ -279,6 +279,7 @@ func isReplaceableResponse(res *http.Response) bool {
 //     发现②），10× 足以放行全部正常语料规则（其输出≈输入）并截停膨胀；
 //   - replaceMaxOutputSize：绝对上限 10MB——对齐 replaceMaxBodySize 的
 //     文档口径（AdGuard 文档 2876），防止小体大模板绕过相对口径。
+//
 // 注意：上限检查在 ReplaceAll 之后（裁决指定形态），它封住交付/驻留的
 // 输出尺寸；ReplaceAll 自身的临时分配仍与"本会产生的输出"同阶，极端
 // 组引用炸弹的瞬时代价已在 report.md §8 如实标注。

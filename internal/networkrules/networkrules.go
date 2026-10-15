@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -73,6 +74,11 @@ type NetworkRules struct {
 	covE     []covRecException
 	// covTimeNanos 是最近一次去重阶段的耗时（resolve+prune，诊断用）。
 	covTimeNanos atomic.Int64
+
+	// domainGateOn controls the WS1 $domain regexp pre-filter (2026-10-14).
+	// Default true; WithDomainGate(false) or ZEN_AI_DOMAIN_GATE=0 restores
+	// the pre-WS1 query path exactly.
+	domainGateOn bool
 }
 
 // NetworkRulesOption customizes a NetworkRules at construction.
@@ -93,20 +99,122 @@ func WithCoverageDedup(enabled bool) NetworkRulesOption {
 	return func(nr *NetworkRules) { nr.covOn = enabled }
 }
 
+// WithHostSplit enables (default OFF) the pure-hostname index (方案A,
+// 2026-10-14): patterns of the exact shape ||host^ move out of the pattern
+// trie into a per-host map. OFF reproduces the pre-change behaviour
+// bit-exactly — the rollback switch for the index.
+func WithHostSplit(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) {
+		nr.primaryStore.hostSplit = enabled
+		nr.exceptionStore.hostSplit = enabled
+		nr.liveExc.store.hostSplit = enabled
+	}
+}
+
+// WithDomainGate enables (default ON) the $domain eligibility pre-filter for
+// regexp rules (WS1, 2026-10-14, −26.21% ModifyReq measured). OFF makes
+// ModifyReq/ModifyRes call the ungated Get, reproducing the pre-WS1
+// behaviour exactly — the rollback switch for the pre-filter.
+func WithDomainGate(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) { nr.domainGateOn = enabled }
+}
+
+// WithV2Root enables (default OFF) the segment-automaton root class
+// (v2-S6, 2026-10-14): root-subtree patterns (no ||/| anchor) move out of
+// the pattern trie into a segment index — replacing the 53.1% wildcard
+// position enumeration. OFF = pre-v2 behaviour exactly.
+func WithV2Root(enabled bool) NetworkRulesOption {
+	return func(nr *NetworkRules) {
+		nr.primaryStore.v2Root = enabled
+		nr.exceptionStore.v2Root = enabled
+		nr.liveExc.store.v2Root = enabled
+	}
+}
+
 func New(opts ...NetworkRulesOption) *NetworkRules {
 	nr := &NetworkRules{
 		primaryStore:   newRuleStore[*rule.Rule](),
 		exceptionStore: newRuleStore[*exceptionrule.ExceptionRule](),
 		actionIdxOn:    true,
 		covOn:          true,
+		domainGateOn:   os.Getenv("ZEN_AI_DOMAIN_GATE") != "0",
 	}
 	nr.liveExc.store = newRuleStore[*exceptionrule.ExceptionRule]()
+	// $domain eligibility gates (2026-10-14): the store stays generic over
+	// T, so the concrete per-type gate derivation is installed here.
+	nr.primaryStore.gateOf = func(r *rule.Rule) *domainGate {
+		return domainGateOf(r.AndConditionModifiers())
+	}
+	nr.exceptionStore.gateOf = func(er *exceptionrule.ExceptionRule) *domainGate {
+		return domainGateOf(er.AndConditionModifiers())
+	}
+	nr.liveExc.store.gateOf = func(er *exceptionrule.ExceptionRule) *domainGate {
+		return domainGateOf(er.AndConditionModifiers())
+	}
 	nr.modsInterner = newModsInterner()
 	nr.covArmed.Store(true)
+	// 方案A (2026-10-15)：纯主机名索引默认开启——两轮实测背书：
+	// 等价性 PASS（zz_ai_hostmap_equiv，blockDiff=0）、CPU ±1.2% 噪声、
+	// 内存 −4.8MB（abbench live 130.7 vs 135.5，E1 实验）。ZEN_AI_HOSTMAP=0
+	// 显式回退；显式 option 仍优先于环境变量。
+	if os.Getenv("ZEN_AI_HOSTMAP") == "0" {
+		WithHostSplit(false)(nr)
+	} else {
+		WithHostSplit(true)(nr)
+	}
+	if os.Getenv("ZEN_V2_ROOT") == "1" {
+		WithV2Root(true)(nr)
+	}
 	for _, opt := range opts {
 		opt(nr)
 	}
 	return nr
+}
+
+// domainGateOf derives a rule's $domain eligibility gate from its MANDATORY
+// (And) condition modifiers, or nil when the rule has no indexable gate
+// (2026-10-14).
+//
+// $domain is appended to the And set (rule.ParseModifiers), so the modifier
+// must match for the rule to apply at all — a positive entry hit is a
+// necessary condition. Modifiers whose entry list is not suffix-indexable
+// (regexp entries, "example.*" entries, all-negated lists) yield nil, i.e.
+// the rule stays unconditionally eligible: conservative, never wrong.
+func domainGateOf(mods []rulemodifiers.ConditionModifier) *domainGate {
+	for _, m := range mods {
+		dm, ok := m.(*rulemodifiers.DomainModifier)
+		if !ok {
+			continue
+		}
+		lits, indexable := dm.IndexableLiterals()
+		if !indexable {
+			return nil
+		}
+		return &domainGate{lits: lits, matchTarget: dm.MatchTargetDomain}
+	}
+	return nil
+}
+
+// effHostsOf derives the $domain effective-host context for req, mirroring
+// rulemodifiers.DomainModifier.matchReqSide: the referrer hostname, falling
+// back to the request's own hostname when the Referer header is absent. An
+// unparseable Referer makes every $domain condition false (usable=false).
+func effHostsOf(req *http.Request) effHosts {
+	var e effHosts
+	if req == nil || req.URL == nil {
+		return e
+	}
+	e.own = req.URL.Hostname()
+	if ref := req.Header.Get("Referer"); ref != "" {
+		h, ok := rulemodifiers.RefererHostname(ref)
+		if !ok {
+			return e // usable stays false
+		}
+		e.ref, e.usable = h, true
+		return e
+	}
+	e.ref, e.usable = e.own, true
+	return e
 }
 
 // maxMatchURLLen (2026-10-08 P6): AdGuard truncates URLs to 4096 characters
@@ -135,7 +243,13 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	// semantics); hoist the two header reads out of the per-rule evaluation.
 	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
 
-	storeRules := nr.primaryStore.Get(reqURL)
+	var eff effHosts
+	effP := (*effHosts)(nil)
+	if nr.domainGateOn {
+		eff = effHostsOf(req)
+		effP = &eff
+	}
+	storeRules := nr.primaryStore.GetHosts(reqURL, effP)
 	defer nr.primaryStore.putRes(storeRules)
 	primaryRules, reqScratch := nr.prependIndexedReq(storeRules, req)
 	if reqScratch != nil {
@@ -150,7 +264,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	// Exceptions matching the request URL are judged per request (2026-10-08
 	// B2/H3): URL pattern hit plus the exception's own condition modifiers.
-	exceptions := nr.exceptionStore.Get(reqURL)
+	exceptions := nr.exceptionStore.GetHosts(reqURL, effP)
 	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
@@ -307,7 +421,13 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	restrictFrames := nr.frameScopedRules.Load() > 0
 	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
 
-	storeRules := nr.primaryStore.Get(url)
+	var resEff effHosts
+	resEffP := (*effHosts)(nil)
+	if nr.domainGateOn {
+		resEff = effHostsOf(req)
+		resEffP = &resEff
+	}
+	storeRules := nr.primaryStore.GetHosts(url, resEffP)
 	defer nr.primaryStore.putRes(storeRules)
 	primaryRules, resScratch := nr.prependIndexedRes(storeRules, res)
 	if resScratch != nil {
@@ -488,6 +608,11 @@ func (nr *NetworkRules) Compact() {
 	nr.applyCoverageDedup()
 	nr.primaryStore.Compact()
 	nr.exceptionStore.Compact()
+	// T1（2026-10-15）：树候选 $domain 反向索引——在 badfilter/覆盖去重/
+	// trimslice 全部收尾后构建（作用于最终规则集，构建后不可变）。
+	// 2026-10-15 修正：仅 primaryStore——exceptionStore 的 $domain 语义在
+	// Cancels 链路上与 eff(ref/own) 不完全同构（dump 红灯实锤），回退保守。
+	nr.primaryStore.buildTreeGate()
 	// Freeze (2026-10-13): from here on the stores are read-only for
 	// serving; ParseRule routes runtime exception inserts into liveExc.
 	nr.frozen.Store(true)

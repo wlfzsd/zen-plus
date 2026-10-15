@@ -397,7 +397,11 @@ func (nr *NetworkRules) applyCoverageDedup() {
 		for rec := range dropP {
 			dropPtrP[rec.rule] = struct{}{}
 		}
-		removedP = nr.primaryStore.tree.PruneValues(func(r *rule.Rule) bool {
+		// 方案A: prune through the store, not the tree directly — the
+		// hostname index (ruleStore.hostRules) holds ||host^ rules the tree
+		// no longer sees, and missing them would flip parent/child coverage
+		// outcomes (2026-10-14 equivalence probe).
+		removedP = nr.primaryStore.pruneValues(func(r *rule.Rule) bool {
 			_, ok := dropPtrP[r]
 			return ok
 		})
@@ -408,7 +412,7 @@ func (nr *NetworkRules) applyCoverageDedup() {
 		for rec := range dropE {
 			dropPtrE[rec.rule] = struct{}{}
 		}
-		removedE = nr.exceptionStore.tree.PruneValues(func(er *exceptionrule.ExceptionRule) bool {
+		removedE = nr.exceptionStore.pruneValues(func(er *exceptionrule.ExceptionRule) bool {
 			_, ok := dropPtrE[er]
 			return ok
 		})

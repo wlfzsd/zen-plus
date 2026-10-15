@@ -1,0 +1,7 @@
+=== RUN   TestDATTransitionParity
+    diag6_test.go:52: 前缀="betaa": map outs=0 dat outs=1 (map独=[] dat独=[bet])
+    diag6_test.go:52: 前缀="betab": map outs=0 dat outs=1 (map独=[] dat独=[bet])
+    diag6_test.go:52: 前缀="beta/": map outs=1 dat outs=2 (map独=[] dat独=[bet])
+    diag6_test.go:52: 前缀="beta.": map outs=1 dat outs=2 (map独=[] dat独=[bet])
+    diag6_test.go:52: 前缀="betac": map outs=0 dat outs=1 (map独=[] dat独=[bet])
+    diag6_test.go:52: 前缀="betao": map outs=0 dat outs=1 (map独=[] dat独=[bet])

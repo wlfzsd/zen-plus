@@ -210,14 +210,14 @@ func logJSONPruneApplyFailure(raw string, err error) {
 // 的 JSON 嵌套深度上限。口径对齐 Go 标准库 encoding/json 的
 // maxNestingDepth=10,000（go/src/encoding/json/scanner.go）：超出视为病态结构，
 // 拒绝应用。原因（bound_audit 发现①）：spyzhov/ajson 的 $.. 递归下降
-//（jsonpath.go recursiveChildren）与 Marshal（encode.go）都是无界递归，
+// （jsonpath.go recursiveChildren）与 Marshal（encode.go）都是无界递归，
 // 深嵌套 body 会触发 fatal error: stack overflow——不可 recover，代理进程
 // 整体死亡。深度门把恶意结构挡在一切 ajson 调用之前。
 const jsonPruneMaxDepth = 10_000
 
 // [bound_audit 修复批 2026-10-08，发现③] jsonPruneMaxBodySize 是 jsonprune
 // 缓冲改写的 body 上限，口径对齐 $replace 的 replaceMaxBodySize=10MB
-//（AdGuard 文档 2876）。超限体不经缓冲、原样流式透传。
+// （AdGuard 文档 2876）。超限体不经缓冲、原样流式透传。
 const jsonPruneMaxBodySize = 10 << 20
 
 // jsonPruneDepthExceeded 字节级扫描 src 的 {/[ 嵌套深度（跳过字符串字面量，

@@ -98,6 +98,43 @@ func (m *DomainModifier) HasPermittedDomains() bool {
 	return false
 }
 
+// IndexableLiterals returns the modifier's non-negated literal entries when
+// the whole entry list can be pre-filtered by host-suffix lookup, plus
+// ok=true. ok=false means the caller must treat the modifier as
+// non-indexable (every host stays eligible) — returned for regexp entries,
+// "example.*" effective-TLD entries, an empty list, and lists with no
+// non-negated entry at all.
+//
+// Soundness (2026-10-14, domain-gate pre-filter): matchHost(hostname)
+// requires at least one non-negated entry to hit whenever the list HAS a
+// non-negated entry (matchHost: `permitted || !hasPermitted`), and a plain
+// entry hits exactly when hostname equals it or ends with "."+entry
+// (domainModifierEntry.MatchDomain). So "hostname's suffix chain intersects
+// lits" is a NECESSARY condition for the modifier to match. Rules carrying
+// $domain sit in the mandatory And set (rule.ParseModifiers), so a rule
+// failing this test can never match — skipping it changes no outcome.
+func (m *DomainModifier) IndexableLiterals() (lits []string, ok bool) {
+	if len(m.entries) == 0 {
+		return nil, false
+	}
+	for i := range m.entries {
+		e := &m.entries[i]
+		if e.inverted {
+			continue
+		}
+		// A non-negated entry that is not a plain domain is a regexp or an
+		// "example.*" TLD entry: not suffix-indexable.
+		if e.regular == "" {
+			return nil, false
+		}
+		lits = append(lits, e.regular)
+	}
+	if len(lits) == 0 {
+		return nil, false // all-negated list is vacuously true
+	}
+	return lits, true
+}
+
 func (m *DomainModifier) Parse(modifier string) error {
 	eqIndex := strings.IndexByte(modifier, '=')
 	if eqIndex == -1 || eqIndex == len(modifier)-1 {
