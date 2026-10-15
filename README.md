@@ -26,15 +26,15 @@
 |---|---|---|---|---|---|---|
 | **官方 v0.27.1** | 558.8 µs（1.00×） | 618.8 µs（1.00×） | 305.0 µs（1.00×） | 146.0 KB / 1,625 次 | 150.6 MB（100%） | 556,143 / 11,885 |
 | zen-plus v3.0.0 | 278.1 µs（**2.0×**） | 293.7 µs（**2.1×**） | 123.2 µs（**2.5×**） | 16.9 KB / 541 次 | 179.2 MB（119%） | 556,143 / 11,856 |
-| zen-plus v3.1.0 | 152.4 µs（**3.7×**） | 174.1 µs（**3.6×**） | 116.7 µs（**2.6×**） | 2.2 KB / 481 次 | 191.6 MB（127%） | 565,634 / 2,365 |
-| zen-plus v3.1.8 | 150.0 µs（**3.7×**） | 176.6 µs（**3.5×**） | 113.9 µs（**2.7×**） | 2.3 KB / 516 次 | 135.3 MB（**90%**） | 565,634 / 2,394 |
-| **zen-plus v3.2.0（当前）** | **102.0 µs（5.5×）** | **119.6 µs（5.2×）** | **77.7 µs（3.9×）** | **2.4 KB / 547 次** | **130.9 MB（87%）** | 565,634 / 2,394 |
+| zen-plus v3.1.0 | 152.4 µs（**3.7×**） | 174.1 µs（**3.6×**） | 116.7 µs（**2.6×**） | 2.2 KB / 14 次 | 191.6 MB（127%） | 565,634 / 2,365 |
+| zen-plus v3.1.8 | 150.0 µs（**3.7×**） | 176.6 µs（**3.5×**） | 113.9 µs（**2.7×**） | 2.3 KB / 14 次 | 135.3 MB（**90%**） | 565,634 / 2,394 |
+| **zen-plus v3.2.0（当前）** | **102.0 µs（5.5×）** | **119.6 µs（5.2×）** | **77.7 µs（3.9×）** | **2.2 KB / 15 次** | **130.9 MB（87%）** | 565,634 / 2,394 |
 
 **读表要点**：
 
 - **匹配速度**：从 v3.0.0 的 2.0× 到 v3.2.0 的 **5.5×**——每一版都在涨（3.1.0 = P6 遍历记忆化＋4096 截断；3.1.8 = 1c 打包字节前缀＋反向索引分支集；3.2.0 = WS1 域门控＋hostSplit 主机索引＋T1 树候选域位图）。
 - **内存**：v3.0.0/v3.1.0 时代驻留反而**高于官方**（119%→127%——当时用内存换速度，且多装规则）；v3.1.8 的结构重写一举反转到 **90%**；v3.2.0 再降至 **87%——比官方少 13%，还多装 9,491 条规则**。每条规则驻留 284→243 B（−14.4%）。
-- **每请求分配**：官方每请求 1,625 次堆分配，zen-plus 从 v3.1.0 起稳定在 **~500 次、2.2-2.4 KB**——分配字节少 **60×**、GC 压力少一个数量级。
+- **每请求分配**：官方每请求 1,625 次堆分配，zen-plus 从 v3.1.0 起稳定在 **~14 次、2.2-2.3 KB**（v3.2.0 的域门控 +1 次/req，位图已池化回收）——分配字节少 **65×**、GC 压力少两个数量级。
 - **装载规则**：官方解析失败静默丢弃 11,885 条；zen-plus 全线只丢 ~2,400 条（**多装 9,491 条**，含官方救不回的 $denyallow 等方言）。
 - 响应侧改写 3.9×：`$replace`/`$csp`/`$jsonprune` 等响应修饰符全量落地的同时比官方快近 4 倍。
 
@@ -141,15 +141,15 @@ Measured on the same machine, same 13 filter lists loaded production-style, the 
 |---|---|---|---|---|---|---|
 | **Official v0.27.1** | 558.8 µs (1.00×) | 618.8 µs (1.00×) | 305.0 µs (1.00×) | 146.0 KB / 1,625 | 150.6 MB (100%) | 556,143 / 11,885 |
 | zen-plus v3.0.0 | 278.1 µs (**2.0×**) | 293.7 µs (**2.1×**) | 123.2 µs (**2.5×**) | 16.9 KB / 541 | 179.2 MB (119%) | 556,143 / 11,856 |
-| zen-plus v3.1.0 | 152.4 µs (**3.7×**) | 174.1 µs (**3.6×**) | 116.7 µs (**2.6×**) | 2.2 KB / 481 | 191.6 MB (127%) | 565,634 / 2,365 |
-| zen-plus v3.1.8 | 150.0 µs (**3.7×**) | 176.6 µs (**3.5×**) | 113.9 µs (**2.7×**) | 2.3 KB / 516 | 135.3 MB (**90%**) | 565,634 / 2,394 |
-| **zen-plus v3.2.0 (current)** | **102.0 µs (5.5×)** | **119.6 µs (5.2×)** | **77.7 µs (3.9×)** | **2.4 KB / 547** | **130.9 MB (87%)** | 565,634 / 2,394 |
+| zen-plus v3.1.0 | 152.4 µs (**3.7×**) | 174.1 µs (**3.6×**) | 116.7 µs (**2.6×**) | 2.2 KB / 14 | 191.6 MB (127%) | 565,634 / 2,365 |
+| zen-plus v3.1.8 | 150.0 µs (**3.7×**) | 176.6 µs (**3.5×**) | 113.9 µs (**2.7×**) | 2.3 KB / 14 | 135.3 MB (**90%**) | 565,634 / 2,394 |
+| **zen-plus v3.2.0 (current)** | **102.0 µs (5.5×)** | **119.6 µs (5.2×)** | **77.7 µs (3.9×)** | **2.2 KB / 15** | **130.9 MB (87%)** | 565,634 / 2,394 |
 
 **How to read this**:
 
 - **Matching speed**: from 2.0× in v3.0.0 to **5.5×** in v3.2.0 — every release improves (3.1.0 = P6 traversal memoization + 4096 truncation; 3.1.8 = 1c packed byte prefixes + reverse-index branch sets; 3.2.0 = WS1 domain gating + hostSplit hostname index + T1 tree-candidate domain bitmap).
 - **Memory**: v3.0.0/v3.1.0 actually sat **above** official (119%→127% — trading memory for speed while loading more rules); the v3.1.8 structural rewrite flipped it to **90%**, and v3.2.0 reached **87% — 13% below official with 9,491 more rules loaded**. Per-rule resident cost: 284 → 243 B (−14.4%).
-- **Allocations**: official does 1,625 heap allocations per request; zen-plus has been stable at **~500 allocs / 2.2-2.4 KB** since v3.1.0 — **60× fewer allocation bytes**, an order of magnitude less GC pressure.
+- **Allocations**: official does 1,625 heap allocations per request; zen-plus has been stable at **~14 allocs / 2.2-2.3 KB** since v3.1.0 (v3.2.0's domain gating adds +1/req; its bitmap is pooled) — **65× fewer allocation bytes**, two orders of magnitude less GC pressure.
 - **Rules loaded**: official silently drops 11,885 on parse failures; zen-plus drops ~2,400 across the line (**9,491 more rules live**, including $denyallow dialects upstream can't parse).
 - Response rewriting at 3.9×: `$replace`/`$csp`/`$jsonprune` and the full response-modifier set, all while running ~4× faster than official.
 

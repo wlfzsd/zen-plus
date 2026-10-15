@@ -2,6 +2,7 @@ package networkrules
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
 )
@@ -31,6 +32,30 @@ type treeGateIndex[T comparable] struct {
 	//（与 tokenindex idxMaxRules 的保守回退同款）。
 	nBits int
 	over  bool
+
+	// bufPool 复用每请求的资格位图 scratch（2026-10-15：filterTree 原先每请求
+	// make 一次 (nBits+63)/64 字长位图，主/例外两 store 合计 ~2 次/req 的
+	// 小对象分配——五版本对比中 v3.2.0 分配次数从 13.6 升至 15.5 次/req 的
+	// 主源。同 resPool/查询状态池先例：scratch 用后即还，不持引用）。
+	bufPool sync.Pool
+}
+
+// getBuf 取一块清零的资格位图；putBuf 归还（容量不足者丢弃防肥池）。
+func (g *treeGateIndex[T]) getBuf() []uint64 {
+	if p, ok := g.bufPool.Get().(*[]uint64); ok {
+		b := *p
+		if len(b) >= (g.nBits+63)/64 {
+			clear(b[:(g.nBits+63)/64])
+			return b[:(g.nBits+63)/64]
+		}
+	}
+	return make([]uint64, (g.nBits+63)/64)
+}
+
+func (g *treeGateIndex[T]) putBuf(b []uint64) {
+	if cap(b) >= (g.nBits+63)/64 {
+		g.bufPool.Put(&b)
+	}
 }
 
 // buildTreeGate 遍历树 + generic + hostRules 构建索引。仅在 Compact 内调用
@@ -106,8 +131,9 @@ func (g *treeGateIndex[T]) filterTree(res []T, eff *effHosts) []T {
 		}
 		return out
 	}
-	// 位图标记（后缀链，镜像 tokenindex.markEligible）——动态尺寸
-	elig := make([]uint64, (g.nBits+63)/64)
+	// 位图标记（后缀链，镜像 tokenindex.markEligible）——池化 scratch（清零后用）
+	elig := g.getBuf()
+	defer g.putBuf(elig)
 	add := func(m map[string][]int32, host string) {
 		if len(m) == 0 || host == "" {
 			return
