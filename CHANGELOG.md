@@ -1,17 +1,25 @@
 # Changelog
 
-## v0.25.1
+## v3.2.1
 
-### What's New
+### zen-plus v3.2.1
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+### 引擎（对比官方 v0.27.1，同机同列表同语料）
+- 匹配 **5.5×**（102.0 µs/req vs 官方 558.8 µs）、XHR 匹配 5.2×、响应改写 **3.9×**
+- 每请求堆分配 **2.2 KB / 15 次**（官方 146 KB / 1,625 次）
+- 驻留内存 **87%**（130.9 vs 150.6 MB），且多装 9,491 条规则（解析失败 2,394 vs 11,885——官方静默丢弃）
 
-Thank you for using Zen!
+### 本版新增（相对 v3.2.0）
+- T1 域门控资格位图池化（每请求分配字节 −6.4%，CPU 持平；黄金 dump 逐位一致）
+- 五版本演化基准（官方=1.0×：v3.0.0 2.0× → v3.1.0 3.7× → v3.1.8 3.7× → v3.2.1 5.5×）与基准语料入库
+- README 版本演化表 + docs/benchmarks/five-version-evolution-2026-10-15.md
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+### 功能（官方至 v0.27.1 仍缺）
+- HTTP/2 协议层指纹重放、TLS+h2 全层指纹镜像、上游代理链（HTTP/HTTPS/SOCKS5）
+- AdGuard 语法兼容：$badfilter / $removeparam / $replace / $csp / $permissions / $cookie / $jsonprune、!#if 等
+
+### 安装
+下载 Zen.exe 覆盖 %LOCALAPPDATA%\Programs\Zen\Zen.exe（SHA256 见 Zen.exe.sha256；未签名，SmartScreen 提示属正常）。
 
 ## v0.25.0
 
