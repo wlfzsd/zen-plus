@@ -35,13 +35,18 @@ const filterBuildTimeout = 90 * time.Second
 // cache-only and finish".
 var errBuildAborted = errors.New("build aborted")
 
-// passModes ladders successive build passes away from the network: a pass
-// that saw a truncated stream retries under the next mode, and the final
-// pass reads only from cache, where mid-parse breaks are all but impossible
-// (cache serves are read into memory up front).
+// passModes keeps the startup build off the network: the first pass serves
+// any cached copy instantly (stale included, read into memory up front), so
+// a slow or dead mirror can never delay the proxy start. Freshness is
+// maintained out-of-band by the background refresher (filterupdate.go);
+// refreshed content is picked up by the next build. Only lists with no
+// cached copy at all still fetch on the first pass, and a pass that saw a
+// truncated stream retries once with the network before the final cache-only
+// pass, which reads only from cache, where mid-parse breaks are all but
+// impossible.
 var passModes = []filterliststore.FetchMode{
-	filterliststore.ModeDefault,
 	filterliststore.ModePreferCache,
+	filterliststore.ModeDefault,
 	filterliststore.ModeCacheOnly,
 }
 
@@ -179,6 +184,9 @@ func (a *App) populateFilter(ctx context.Context, f *filter.Filter, mode filterl
 				// contributed most of its rules, unlike one that failed outright.
 				log.Printf("filter list %q: truncated=%v failed=%v stale=%v: %v",
 					filterList.URL, res.Truncated, res.Failed, res.ServedStale, res.Err)
+			}
+			if res.ServedStale {
+				log.Printf("filter list %q: served stale cache copy, a fresh copy will be fetched in the background", filterList.URL)
 			}
 			outcomeMu.Lock()
 			outcome = outcome.Merge(res)

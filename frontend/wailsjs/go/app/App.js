@@ -6,6 +6,10 @@ export function ExportCustomFilterLists() {
   return window['go']['app']['App']['ExportCustomFilterLists']();
 }
 
+export function ForceRefreshFilterLists() {
+  return window['go']['app']['App']['ForceRefreshFilterLists']();
+}
+
 export function ImportCustomFilterLists() {
   return window['go']['app']['App']['ImportCustomFilterLists']();
 }
@@ -24,6 +28,10 @@ export function OpenLogsDirectory() {
 
 export function RestartApplication() {
   return window['go']['app']['App']['RestartApplication']();
+}
+
+export function RunPendingRestart() {
+  return window['go']['app']['App']['RunPendingRestart']();
 }
 
 export function SelectAppForRouting() {

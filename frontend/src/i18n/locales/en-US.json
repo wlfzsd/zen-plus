@@ -70,7 +70,10 @@
     "goTo": "Open in browser",
     "more": "More",
     "removeError": "Failed to remove filter list: {{error}}",
-    "toggleError": "Failed to toggle filter list: {{error}}",
+    "updateNow": "Update now",
+    "updateDone": "Subscriptions updated; the proxy was restarted to apply them",
+    "updateUpToDate": "All subscriptions are up to date",
+    "updateError": "Failed to update subscriptions: {{error}}",
     "trusted": "Trusted",
     "whatIsThis": "What is this"
   },

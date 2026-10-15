@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { AppToaster } from '@/common/toaster';
 import { useProxyState } from '@/context/ProxyStateContext';
+import { ForceRefreshFilterLists } from 'wails/go/app/App';
 import { GetFilterLists, RemoveFilterList, ToggleFilterList } from 'wails/go/config/Config';
 import { config } from 'wails/go/models';
 import { BrowserOpenURL } from 'wails/runtime/runtime';
@@ -40,6 +41,7 @@ export function FilterLists() {
   }, []);
 
   const [type, setType] = useState<FilterListType>(FilterListType.GENERAL);
+  const [updating, setUpdating] = useState(false);
 
   return (
     <>
@@ -72,6 +74,29 @@ export function FilterLists() {
         >
           <Button text={t(`filterTypes.${type}`)} endIcon="caret-down" />
         </Select>
+
+        <Button
+          icon="refresh"
+          loading={updating}
+          onClick={async () => {
+            setUpdating(true);
+            try {
+              const changed = await ForceRefreshFilterLists();
+              AppToaster.show({
+                message: t(changed ? 'filterLists.updateDone' : 'filterLists.updateUpToDate'),
+                intent: 'success',
+              });
+            } catch (err) {
+              AppToaster.show({
+                message: t('filterLists.updateError', { error: String(err) }),
+                intent: 'danger',
+              });
+            }
+            setUpdating(false);
+          }}
+        >
+          {t('filterLists.updateNow')}
+        </Button>
 
         {type === FilterListType.DIGITAL_WELLBEING && (
           <Button

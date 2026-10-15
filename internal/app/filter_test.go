@@ -30,14 +30,14 @@ func TestRunBuildPasses(t *testing.T) {
 		{
 			name:      "clean first pass is accepted",
 			script:    []scriptedPass{{}},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache},
 		},
 		{
 			name: "failed lists alone do not trigger a rebuild",
 			script: []scriptedPass{
 				{outcome: filter.Outcome{Failed: true, Err: errors.New("no network and no cache")}},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache},
 		},
 		{
 			name: "truncated pass is rebuilt under the next mode",
@@ -45,7 +45,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Truncated: true}},
 				{},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModePreferCache},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeDefault},
 		},
 		{
 			name: "persistent truncation stops at the pass cap",
@@ -54,7 +54,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Truncated: true}},
 				{outcome: filter.Outcome{Truncated: true}},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModePreferCache, filterliststore.ModeCacheOnly},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeDefault, filterliststore.ModeCacheOnly},
 		},
 		{
 			// Failed lists may still have cached copies the spent deadline
@@ -65,7 +65,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Failed: true}, expireDeadline: true},
 				{},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModeCacheOnly},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeCacheOnly},
 		},
 		{
 			name: "truncation then deadline expiry still ends cache-only",
@@ -74,7 +74,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Failed: true}, expireDeadline: true},
 				{},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModePreferCache, filterliststore.ModeCacheOnly},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeDefault, filterliststore.ModeCacheOnly},
 		},
 		{
 			// A failed cache-only pass must not loop: with the network off the
@@ -91,7 +91,7 @@ func TestRunBuildPasses(t *testing.T) {
 			script: []scriptedPass{
 				{err: errCreate},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache},
 			wantErr:   errCreate,
 		},
 		{
@@ -101,7 +101,7 @@ func TestRunBuildPasses(t *testing.T) {
 			script: []scriptedPass{
 				{outcome: filter.Outcome{Truncated: true}, abort: true},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache},
 			wantErr:   errBuildAborted,
 		},
 		{
@@ -120,7 +120,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Failed: true}, expireDeadline: true},
 				{abort: true},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModeCacheOnly},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeCacheOnly},
 			wantErr:   errBuildAborted,
 		},
 		{
@@ -128,7 +128,7 @@ func TestRunBuildPasses(t *testing.T) {
 			script: []scriptedPass{
 				{err: errCreate, abort: true},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache},
 			wantErr:   errBuildAborted,
 		},
 		{
@@ -141,7 +141,7 @@ func TestRunBuildPasses(t *testing.T) {
 				{outcome: filter.Outcome{Truncated: true}},
 				{abort: true},
 			},
-			wantModes: []filterliststore.FetchMode{filterliststore.ModeDefault, filterliststore.ModePreferCache, filterliststore.ModeCacheOnly},
+			wantModes: []filterliststore.FetchMode{filterliststore.ModePreferCache, filterliststore.ModeDefault, filterliststore.ModeCacheOnly},
 			wantErr:   errBuildAborted,
 		},
 	}

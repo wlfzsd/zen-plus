@@ -70,7 +70,10 @@
     "goTo": "在浏览器中打开",
     "more": "更多",
     "removeError": "移除过滤列表失败：{{error}}",
-    "toggleError": "切换过滤列表失败：{{error}}",
+    "updateNow": "立即更新订阅",
+    "updateDone": "订阅已更新，代理已重启应用新规则",
+    "updateUpToDate": "全部订阅均为最新",
+    "updateError": "更新订阅失败：{{error}}",
     "trusted": "受信任",
     "whatIsThis": "这是什么"
   },

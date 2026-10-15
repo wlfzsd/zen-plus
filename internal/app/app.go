@@ -147,6 +147,8 @@ func (a *App) commonStartup(ctx context.Context) {
 		go su.RunScheduledUpdateChecks()
 	}
 
+	a.startFilterUpdateScheduler()
+
 	time.AfterFunc(time.Second, func() {
 		// This is a workaround for the issue where not all React components are mounted in time.
 		// StartProxy requires an active event listener on the frontend to show the user the correct proxy state.

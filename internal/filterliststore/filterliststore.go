@@ -101,6 +101,10 @@ const (
 	ModePreferCache
 	// ModeCacheOnly never touches the network; a cache miss is an error.
 	ModeCacheOnly
+	// ModeForceFetch ignores cache freshness and re-downloads: any stored entry
+	// is held only as the revalidation fallback behind the request (a 304
+	// refreshes its expiry). The manual "update now" action uses it.
+	ModeForceFetch
 )
 
 // Source reports where the content served by Get came from.
@@ -239,6 +243,12 @@ func (st *FilterListStore) loadCache(url string, mode FetchMode) (content io.Rea
 	}
 	if content == nil {
 		return nil, SourceUnknown, nil
+	}
+
+	if mode == ModeForceFetch {
+		// Forced refresh: never serve, but hold any entry - fresh or stale -
+		// as the revalidation fallback behind the request.
+		return nil, SourceUnknown, &staleEntry{content: content, meta: *meta}
 	}
 
 	fresh := meta.IsFresh()

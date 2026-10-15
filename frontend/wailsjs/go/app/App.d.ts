@@ -4,6 +4,8 @@ import {options} from '../models';
 
 export function ExportCustomFilterLists():Promise<void>;
 
+export function ForceRefreshFilterLists():Promise<boolean>;
+
 export function ImportCustomFilterLists():Promise<void>;
 
 export function IsNoSelfUpdate():Promise<boolean>;
@@ -13,6 +15,8 @@ export function OnSecondInstanceLaunch(arg1:options.SecondInstanceData):Promise<
 export function OpenLogsDirectory():Promise<void>;
 
 export function RestartApplication():Promise<void>;
+
+export function RunPendingRestart():Promise<void>;
 
 export function SelectAppForRouting():Promise<string>;
 

@@ -70,7 +70,10 @@
     "goTo": "在瀏覽器中開啟",
     "more": "更多",
     "removeError": "移除過濾清單失敗：{{error}}",
-    "toggleError": "切換過濾清單失敗：{{error}}",
+    "updateNow": "立即更新訂閱",
+    "updateDone": "訂閱已更新，代理已重啟套用新規則",
+    "updateUpToDate": "全部訂閱均為最新",
+    "updateError": "更新訂閱失敗：{{error}}",
     "trusted": "信任",
     "whatIsThis": "這是什麼"
   },

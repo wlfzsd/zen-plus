@@ -127,6 +127,10 @@ type Config struct {
 		// omitempty keeps the dead key out of fresh configs; configs stamped by the
 		// v0.17.0 migration carry a non-zero value and keep serialising it.
 		AssetPort int `json:"assetPort,omitempty"`
+		// UpdateIntervalHours is how often the background refresher re-checks
+		// subscriptions (AdGuard-Home-style interval in hours). Zero/absent
+		// means the default; see GetFilterUpdateIntervalHours.
+		UpdateIntervalHours int `json:"filterUpdateIntervalHours,omitempty"`
 	} `json:"filter"`
 	Certmanager struct {
 		CAInstalled bool `json:"caInstalled"`
@@ -242,6 +246,21 @@ func New() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// GetFilterUpdateIntervalHours returns the background subscription refresh
+// interval in hours. An unset or non-positive value falls back to the default
+// (one hour): a cycle skips fresh lists without any network traffic, so the
+// interval only bounds how long an expired list may go unnoticed.
+func (c *Config) GetFilterUpdateIntervalHours() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	const defaultHours = 1
+	if c.Filter.UpdateIntervalHours <= 0 {
+		return defaultHours
+	}
+	return c.Filter.UpdateIntervalHours
 }
 
 // GetFilterLists returns the list of enabled filter lists.
