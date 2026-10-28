@@ -6,6 +6,7 @@ import { GetLocale, SetLocale } from 'wails/go/config/Config';
 import deDE from './locales/de-DE.json';
 import enUS from './locales/en-US.json';
 import frFR from './locales/fr-FR.json';
+import huHU from './locales/hu-HU.json';
 import itIT from './locales/it-IT.json';
 import jaJP from './locales/ja-JP.json';
 import kkKZ from './locales/kk-KZ.json';
@@ -37,6 +38,8 @@ export const SUPPORTED_LOCALES = [
   'fr-FR',
   'vi',
   'vi-VN',
+  'hu',
+  'hu-HU',
 ] as const;
 export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number];
 export const FALLBACK_LOCALE: SupportedLocale = 'en-US';
@@ -58,6 +61,7 @@ export const LOCALE_LABELS: LocaleItem[] = [
   { value: 'tr-TR', label: 'Türkçe' },
   { value: 'fr-FR', label: 'Français' },
   { value: 'vi-VN', label: 'Tiếng Việt' },
+  { value: 'hu-HU', label: 'Magyar' },
 ];
 
 // Sort language options into a consistent, user-friendly alphabetical order.
@@ -118,6 +122,8 @@ export async function initI18n() {
       'fr-FR': { translation: frFR },
       vi: { translation: viVN },
       'vi-VN': { translation: viVN },
+      hu: { translation: huHU },
+      'hu-HU': { translation: huHU },
     },
     lng: locale,
     fallbackLng: FALLBACK_LOCALE,

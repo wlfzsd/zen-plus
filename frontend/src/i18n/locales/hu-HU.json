@@ -1,0 +1,219 @@
+{
+  "app": {
+    "proxy": {
+      "description": "A proxy nem aktív. Kattints az alábbi gombra az aktiváláshoz.",
+      "inactive": "Aktiváld a proxyt a blokkolt kérések megtekintéséhez"
+    },
+    "tabs": {
+      "filterLists": "Szűrőlisták",
+      "home": "Kezdőlap",
+      "rules": "Szabályok",
+      "settings": "Beállítások"
+    },
+    "update": {
+      "restart": "Újraindítás",
+      "restartFailed": "Nem sikerült újraindítani az alkalmazást: {{error}}",
+      "restarting": "Újraindítás...",
+      "updateAvailable": "Elérhető a Zen új verziója."
+    }
+  },
+  "appRoutingSettings": {
+    "addApp": "Alkalmazás hozzáadása",
+    "allowlistMode": "Csak a kiválasztott alkalmazások használják a proxyt",
+    "blocklistMode": "Minden alkalmazás használja a proxyt, kivéve a kiválasztottakat",
+    "description": "Válaszd ki, mely alkalmazások használják a Zen proxyját.",
+    "emptyAllowlistWarning": "Nincs kiválasztott alkalmazás. Minden forgalom megkerüli a Zent.",
+    "label": "Alkalmazások útválasztása",
+    "removeApp": "Alkalmazás eltávolítása",
+    "saveError": "Nem sikerült menteni az útválasztási beállításokat: {{error}}",
+    "selectError": "Nem sikerült kiválasztani az alkalmazást: {{error}}"
+  },
+  "autoStartSwitch": {
+    "description": "A Zen automatikus indítása bejelentkezéskor",
+    "disableError": "Nem sikerült kikapcsolni az automatikus indítást: {{error}}",
+    "enableError": "Nem sikerült bekapcsolni az automatikus indítást: {{error}}",
+    "label": "Automatikus indítás"
+  },
+  "common": {
+    "stopProxyToAddFilter": "Állítsd le a proxyt új szűrőlista hozzáadásához",
+    "stopProxyToDeleteFilter": "Állítsd le a proxyt a szűrőlista törléséhez",
+    "stopProxyToEditRules": "Állítsd le a proxyt az egyéni szabályok módosításához",
+    "stopProxyToModify": "Állítsd le a proxyt a beállítás módosításához",
+    "stopProxyToToggleFilter": "Állítsd le a proxyt a szűrőlista be- vagy kikapcsolásához"
+  },
+  "createFilterList": {
+    "addError": "Nem sikerült hozzáadni a szűrőlistát: {{error}}",
+    "addList": "Szűrőlista hozzáadása",
+    "trustedListsWarning": "A megbízható listák erőteljes blokkolási funkciókat használhatnak, például <code>trusted-</code> scriptleteket és JavaScript-szabályokat, de <strong>veszélyeztethetik az adatvédelmet és a biztonságot</strong>, ha egy rosszindulatú fél átveszi őket. Csak megbízható forrásból származó listáknál kapcsold be ezt az opciót."
+  },
+  "donate": "Támogatás",
+  "errorBoundary": {
+    "errorMessage": "Váratlan hiba: {{error}}"
+  },
+  "exportDebugDataButton": {
+    "error": "Nem sikerült exportálni a hibakeresési adatokat: {{error}}",
+    "label": "Hibakeresési adatok exportálása",
+    "success": "Hibakeresési adatok a vágólapra másolva",
+    "tooltip": "Hibakeresési információk másolása a vágólapra"
+  },
+  "exportFilterList": {
+    "errorMessage": "Nem sikerült exportálni a szűrőlistákat: {{error}}",
+    "export": "Exportálás",
+    "successMessage": "Egyéni szűrőlisták sikeresen exportálva"
+  },
+  "exportLogsButton": {
+    "label": "Naplók exportálása",
+    "openError": "Nem sikerült megnyitni a naplók mappáját: {{error}}",
+    "tooltip": "Naplók mappájának megnyitása"
+  },
+  "filterLists": {
+    "copied": "Másolva",
+    "copy": "Hivatkozás másolása",
+    "delete": "Törlés",
+    "goTo": "Megnyitás böngészőben",
+    "more": "Továbbiak",
+    "removeError": "Nem sikerült eltávolítani a szűrőlistát: {{error}}",
+    "toggleError": "Nem sikerült átkapcsolni a szűrőlistát: {{error}}",
+    "trusted": "Megbízható",
+    "whatIsThis": "Mi ez?"
+  },
+  "filterTypes": {
+    "ads": "Hirdetések",
+    "custom": "Egyéni",
+    "digitalWellbeing": "Digitális jóllét",
+    "general": "Általános",
+    "malware": "Kártevők",
+    "privacy": "Adatvédelem",
+    "regional": "Regionális"
+  },
+  "ignoredHostsInput": {
+    "description": "A proxyból kizárandó hosztok. Tanúsítvány-rögzítést (certificate pinning) használó vagy a proxy által zavart szolgáltatásokhoz.",
+    "helper": "Soronként egy hosztot adj meg.",
+    "label": "Figyelmen kívül hagyott hosztok"
+  },
+  "importFilterList": {
+    "errorMessage": "Nem sikerült importálni a szűrőlistákat: {{error}}",
+    "import": "Importálás",
+    "successMessage": "Egyéni szűrőlisták sikeresen importálva"
+  },
+  "intro": {
+    "buttons": {
+      "next": "Tovább",
+      "skip": "Bemutató kihagyása"
+    },
+    "connect": {
+      "caNote": "Első indításkor a Zen kérheti egy helyi főtanúsítvány (root CA) telepítését. Ez teszi lehetővé a HTTPS-szűrést, így a Zen minden oldalon blokkolhatja a hirdetéseket és nyomkövetőket. Minden helyben történik – <strong>semmilyen adat nem hagyja el az eszközödet</strong>.<br />A részletes technikai leírást megtalálod a GitHubon.",
+      "description": "Minden készen áll. Nyomd meg az „Indítás” gombot a Zen átfogó hálózati védelmének bekapcsolásához.",
+      "donateText": "És fontold meg a támogatást itt:",
+      "socialText": "Ha szeretnéd, nézd meg a közösségi oldalainkat:",
+      "title": "Kész is!"
+    },
+    "filterLists": {
+      "description": "A hirdetésblokkoláshoz és az adatvédelemhez a Zen <strong>szűrőlistákat</strong> használ. Ezeket később az alkalmazásban is beállíthatod.",
+      "recommendation": "A területi beállításaid alapján a következő szűrőlisták bekapcsolását javasoljuk:",
+      "title": "Szűrőlisták"
+    },
+    "settings": {
+      "description": "Tekintsd át az alábbi beállításokat:",
+      "settingsNote": "Ezeket bármikor módosíthatod az alkalmazásban.",
+      "title": "Beállítások"
+    },
+    "welcome": {
+      "description": "Válaszd ki a nyelvet:",
+      "title": "Üdvözöl a Zen!"
+    }
+  },
+  "pacPortInput": {
+    "description": "A PAC (automatikus proxykonfiguráció) szerver portja (0 = véletlenszerű).",
+    "helper": "1024 alatti port használatához emelt jogosultság kellhet.",
+    "label": "PAC szerver portja",
+    "setError": "Nem sikerült beállítani a PAC szerver portját: {{error}}"
+  },
+  "portInput": {
+    "description": "A proxyszerver portja (0 = véletlenszerű).",
+    "helper": "1024 alatti port használatához emelt jogosultság kellhet.",
+    "label": "Proxy portja"
+  },
+  "requestLog": {
+    "emptyState": "Kezdj el böngészni a blokkolt kérések megtekintéséhez.",
+    "filterName": "Szűrő neve",
+    "method": "Metódus",
+    "process": "Folyamat",
+    "processName": "Név",
+    "processPath": "Útvonal",
+    "redirectedTo": "Átirányítva ide",
+    "referer": "Hivatkozó",
+    "request": "Kérés",
+    "rule": "Szabály",
+    "rules": "Szabályok",
+    "url": "URL"
+  },
+  "rules": {
+    "help": "Súgó",
+    "placeholder": "Ide írd az egyéni szabályaidat..."
+  },
+  "settings": {
+    "about": {
+      "changelog": "változásnapló",
+      "docs": "Dokumentáció",
+      "tagline": "Átfogó hirdetésblokkolód és adatvédelmi őröd",
+      "version": "Verzió"
+    },
+    "ca": {
+      "confirmTitle": "Biztosan eltávolítod a CA-t?",
+      "errorMessage": "Nem sikerült eltávolítani a CA-t: {{error}}",
+      "reasons": {
+        "malfunctioning": "Úgy gondolod, hogy a CA telepítése hibás. Ez megjelenhet böngészőhibaként HTTPS-oldalak látogatásakor, vagy úgy, hogy más alkalmazások nem tudnak csatlakozni az internethez.",
+        "uninstall": "Teljesen el szeretnéd távolítani a Zent."
+      },
+      "reinstallInfo": "Ha újra elindítod a Zent, új CA települ.",
+      "stopProxyTooltip": "Állítsd le a proxyt a CA eltávolításához",
+      "successMessage": "CA sikeresen eltávolítva",
+      "uninstallButton": "CA eltávolítása",
+      "uninstallConfirm": "Eltávolítás",
+      "usefulIf": "Ez hasznos lehet, ha"
+    },
+    "caKeyStorage": {
+      "cancel": "Mégse",
+      "confirm": "Újragenerálás",
+      "confirmBody": "A kulcs tárolási helyének módosítása új tanúsítványkiadó létrehozásával jár. A Zen most eltávolítja a jelenlegi CA-t, és a következő indításkor újat telepít, így még egyszer megjelenik a rendszer engedélykérése.",
+      "confirmTitle": "Újragenerálod a CA-t?",
+      "descriptionMacOS": "Bekapcsolt állapotban a CA privát kulcsa a Mac Secure Enclave-jében tárolódik, így nem másolható le az eszközről, még kártevő által sem.",
+      "descriptionWindows": "Bekapcsolt állapotban a CA privát kulcsa a számítógép TPM-jében tárolódik, így nem másolható le az eszközről, még kártevő által sem.",
+      "errorMessage": "Nem sikerült módosítani a CA-kulcs tárolását: {{error}}",
+      "experimental": "Kísérleti",
+      "label": "Hardveresen védett CA-kulcs",
+      "learnMore": "További információ",
+      "stopProxyTooltip": "Állítsd le a proxyt a CA-kulcs tárolásának módosításához",
+      "unavailableTooltip": "Ezen az eszközön nem érhető el: {{reason}}"
+    },
+    "language": {
+      "helper": "Válaszd ki a kívánt nyelvet",
+      "label": "Nyelv"
+    },
+    "sections": {
+      "advanced": "Speciális",
+      "app": "Alkalmazás"
+    },
+    "theme": {
+      "chooseTheme": "Téma kiválasztása",
+      "dark": "Sötét",
+      "light": "Világos",
+      "system": "Rendszertéma követése"
+    },
+    "updates": {
+      "automaticUpdates": "Frissítések automatikus letöltése",
+      "description": "Ha be van kapcsolva, a Zen automatikusan keres frissítéseket",
+      "disableError": "Nem sikerült kikapcsolni az automatikus frissítést: {{error}}",
+      "enableError": "Nem sikerült bekapcsolni az automatikus frissítést: {{error}}"
+    }
+  },
+  "startStopButton": {
+    "caSystemTrustUnavailableGuide": "Ezen az eszközön nem található rendszerszintű tanúsítványtár (NixOS-en gyakori), ezért a Zen CA-ja csak a böngészők tanúsítványadatbázisaiba került. Más alkalmazások tanúsítványhibát jelezhetnek.<br />A részletekért lásd <guide-link>ezt az útmutatót</guide-link>.",
+    "start": "Indítás",
+    "startError": "Nem sikerült elindítani a proxyt: {{error}}",
+    "stop": "Leállítás",
+    "stopError": "Nem sikerült leállítani a proxyt: {{error}}",
+    "unsupportedDEGuide": "A rendszerproxy automatikus beállítása jelenleg csak GNOME és KDE alatt támogatott.<br />Kövesd <guide-link>ezt az útmutatót</guide-link> a proxy alkalmazásonkénti beállításához."
+  }
+}

@@ -23,6 +23,7 @@ var bareLocales = map[string]string{
 	"en": "en-US",
 	"de": "de-DE",
 	"fr": "fr-FR",
+	"hu": "hu-HU",
 	"it": "it-IT",
 	"ja": "ja-JP",
 	"kk": "kk-KZ",

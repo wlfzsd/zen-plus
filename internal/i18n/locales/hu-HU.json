@@ -1,0 +1,45 @@
+{
+  "common": {
+    "url": "URL:",
+    "goBack": "Vissza"
+  },
+  "blockPage": {
+    "title": "Kérés blokkolva",
+    "heading": "A Zen blokkolta",
+    "rule": "Szabály:",
+    "filterList": "Szűrőlista:",
+    "allow": "Engedélyezés"
+  },
+  "errorPage": {
+    "technicalDetails": "Technikai részletek",
+    "retry": "Újra",
+    "timeout": {
+      "title": "Az oldal túl sokáig nem válaszolt",
+      "message": "A szerver nem válaszolt időben. Lehet, hogy túlterhelt, vagy probléma van a kapcsolatoddal."
+    },
+    "notFound": {
+      "title": "A szerver nem található",
+      "message": "A Zen nem talált szervert ezen a címen. Ellenőrizd, nincs-e elírás a címben, vagy próbáld újra kicsit később."
+    },
+    "refused": {
+      "title": "A kapcsolat elutasítva",
+      "message": "A szerver elutasította a kapcsolatot. Lehet, hogy az oldal nem működik, vagy nem fogad kapcsolatot ezen a porton."
+    },
+    "reset": {
+      "title": "A kapcsolat megszakadt",
+      "message": "A szerverrel való kapcsolat megszakadt. Ez általában átmeneti."
+    },
+    "tls": {
+      "title": "Nem sikerült biztonságos kapcsolatot létesíteni",
+      "message": "A Zen nem tudott biztonságos kapcsolatot létesíteni ezzel az oldallal. Újrapróbálkozáskor előfordulhat, hogy a kapcsolat a Zen szűrése nélkül jön létre ennél az oldalnál."
+    },
+    "unreachable": {
+      "title": "Az oldal nem érhető el",
+      "message": "A Zen nem érte el a szervert. Ellenőrizd a kapcsolatot, vagy próbáld újra kicsit később."
+    },
+    "internal": {
+      "title": "Hiba történt",
+      "message": "A Zen belső hibába ütközött az oldal feldolgozása közben. Az újrapróbálkozás segíthet."
+    }
+  }
+}
