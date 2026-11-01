@@ -84,6 +84,11 @@ type h2FailState struct {
 // buffering is not a false kill. The h1 mirror leg needs no counterpart: it
 // has ResponseHeaderTimeout plus the transport's stale-conn retry.
 const (
+	// [2026-11-01 复核] 这两个值保持 20s/20s，刻意不下调：ping 只能发现"整条
+	// 连接再无帧"，而本次复现（TestH2StaleConnStall）的形态是对端**仍在应答
+	// PING**、唯独把我方流挂起的"半死连接"——ping 通路对此无效，真正兜底的是
+	// 下面的 chainedH2TTFBTimeout。下调 ping 超时只会在上游拥塞（本机实测上游
+	// 链 RTT ~230ms、偶发多秒抖动）时把健康连接误杀，收益为零。
 	chainedH2ReadIdleTimeout = 20 * time.Second
 	chainedH2PingTimeout     = 20 * time.Second
 
@@ -115,7 +120,20 @@ const (
 	// hard bound out on 2026-10-13). On timeout the request completes on the
 	// h1 mirror leg via the dial-handoff shape and the streak feeds the
 	// existing failure latch.
-	chainedH2TTFBTimeout = 30 * time.Second
+	//
+	// [2026-11-01] 30s → 10s。这里界的是"等响应头"，不是传输：头部一到守卫即停，
+	// 所以缩短不会误杀长视频（该顾虑只对整条流生效）。健康路径实测 TTFB p50
+	// 232ms / p90 507ms / 冷启动最差 2.2s，10s 仍有 4.5× 余量；而 ping 只能发现
+	// "整条连接静默"，对"连接还在收帧、唯独本流不回头部"的形态无效——这种情形
+	// 下用户要多等 20s 才轮到 h1 兜底。实测复现：TestH2StaleConnStall。
+	chainedH2TTFBTimeout = 10 * time.Second
+
+	// chainedH2TTFBTimeoutNonReplay 是"带体/非幂等请求"的守卫窗口，保持原来的
+	// 30s [2026-11-01]。TTFB 到点后的动作是把请求整条改投 h1 镜像腿，对 POST
+	// 这类请求等于二次提交；收紧窗口会把这种重复提交的概率放大，故只对
+	// 可重放请求（见 h2ReplaySafe）收紧。语义边界：这只是风险分档，不是对
+	// 带体请求的正确性保证——真正的解法仍应在上游侧消除静默丢弃。
+	chainedH2TTFBTimeoutNonReplay = 30 * time.Second
 
 	// h2 failure latch [2026-10-13]: h2FailLatchThreshold failures within
 	// h2FailLatchWindow pin the target to the h1 mirror leg (markH1Only),
@@ -182,6 +200,23 @@ func (m *mimicRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // 流级挂死修复].
 var errH2TTFBTimeout = errors.New("mimic: h2 leg time-to-first-header timeout")
 
+// h2ReplaySafe reports whether the request can be sent a second time without
+// side effects: a bodyless idempotent request. It gates how aggressively the
+// TTFB guard may tighten, because a guard firing replays the request on the h1
+// mirror leg [2026-11-01].
+func h2ReplaySafe(req *http.Request) bool {
+	if req == nil || req.Body != nil || req.ContentLength > 0 {
+		return false
+	}
+	switch req.Method {
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		// "" covers http.Request shapes built without a method (CONNECT
+		// handoffs); Go's server always fills it in for real traffic.
+		return true
+	}
+	return false
+}
+
 // classifyH2RoundTripErr maps an h2-leg RoundTrip error against the TTFB
 // guard state: (ttfbTimeout, clientCancel). Guard-fired cancels are the
 // guard's own doing (feed the latch); cancels with an un-fired guard are the
@@ -211,9 +246,16 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 	// (control plane alive, PINGs answered) used to hang here silently -
 	// the ping liveness passes and the failure latch only counts returned
 	// errors, so the request waited until the client gave up.
+	// [2026-11-01] 守卫窗口按可重放性分档：TTFB 到点会把本请求改投 h1 镜像腿
+	// （=整条请求重发一次）。对无体幂等请求（GET/HEAD）这是免费的；对带体请求
+	// 则是重复提交风险，故只有可重放请求享受收紧后的 10s，其余保留原来的 30s。
+	guardWindow := chainedH2TTFBTimeout
+	if !h2ReplaySafe(req) {
+		guardWindow = chainedH2TTFBTimeoutNonReplay
+	}
 	guardCtx, cancelGuard := context.WithCancel(req.Context())
 	var guardFired atomic.Bool
-	guardTimer := time.AfterFunc(chainedH2TTFBTimeout, func() {
+	guardTimer := time.AfterFunc(guardWindow, func() {
 		guardFired.Store(true)
 		cancelGuard()
 	})
@@ -229,7 +271,7 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 	}
 	isTTFB, isClientCancel := classifyH2RoundTripErr(err, guardFired.Load())
 	if isTTFB {
-		err = fmt.Errorf("%w: %s after %v without response headers", errH2TTFBTimeout, redacted.Redacted(addr), chainedH2TTFBTimeout)
+		err = fmt.Errorf("%w: %s after %v without response headers", errH2TTFBTimeout, redacted.Redacted(addr), guardWindow)
 	}
 	if isClientCancel {
 		log.Printf("mimic: h2 leg roundtrip to %s canceled by client; not counted as an h2 failure", redacted.Redacted(addr))
