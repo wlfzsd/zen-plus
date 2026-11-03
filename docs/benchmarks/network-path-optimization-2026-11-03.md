@@ -101,12 +101,25 @@ go test ./internal/proxy -run 'TestPerfReal' -v -timeout 30m
 **改法**：`internal/proxy/upstreamchain.go` 的 `chainedIdleConnTimeout` 从常量改为
 `180s`（`ZEN_CHAIN_IDLE_TIMEOUT` 可覆盖，回滚 `=30s` 免重编译）。
 
-**对比实测**（同一条 200ms RTT 合成链路，空闲 35s 后连续 3 次请求）：
+**对比实测 A（空闲 35s 后连续 3 次请求，改前/改后各一轮）**：
 
 | | 首请求 TTFB | 第 2/3 次 |
 |---|---|---|
 | 改前（30s 空闲窗） | **417.4ms**（冷） | 205.4–205.8ms |
 | 改后（180s 空闲窗） | **205.0ms**（热） | 205.6–206.1ms |
+
+**对比实测 B（同二进制、`ZEN_CHAIN_IDLE_TIMEOUT` 切换、3 轮交替 —— 消除"改前改后不是同一次网络条件"的质疑）**：
+
+| 轮次 | 30s（改前策略）空闲后首请求 | 180s（改后策略）空闲后首请求 |
+|---|---|---|
+| 1 | 419.4ms | 206.1ms |
+| 2 | 415.0ms | 205.7ms |
+| 3 | 418.1ms | 206.5ms |
+| 中位 | **418.1ms** | **206.1ms** |
+
+→ 3/3 轮两分布无重叠，**Δ = −212ms ≈ 1 个 RTT**（本测量口径）；对 200ms RTT 的真实链路≈200ms。
+复跑：`$env:ZEN_PERF="1"; $env:ZEN_CHAIN_IDLE_TIMEOUT="30s"; go test ./internal/proxy -run TestPerfIdleFirstRequest -v`
+（与 `"180s"` 交替）。
 
 → **每次"回来第一下"省 1 个 RTT（本测量口径 212ms）**；对 200ms RTT 的真实链路≈200ms。
 

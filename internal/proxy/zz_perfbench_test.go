@@ -1117,3 +1117,37 @@ func TestPerfRealViaLocalRelay(t *testing.T) {
 		}
 	}
 }
+
+// TestPerfIdleFirstRequest 只测一件事：空闲 35s 之后"第一个请求"的 TTFB。
+// 用 ZEN_CHAIN_IDLE_TIMEOUT 在同一份二进制里切换 30s/180s 两种策略，供外部脚本
+// 交替多轮调用，形成同构建多轮 A/B（消除"改前改后不是同一次网络条件"的质疑）。
+func TestPerfIdleFirstRequest(t *testing.T) {
+	perfGate(t)
+
+	origin := newPerfOrigin(t)
+	chain := newPerfChain(t, origin.addr)
+	chain.delay = perfRTT
+	zen := newPerfZen(t, chain)
+	client := perfProxyClient(zen.addr, true)
+	ctx := context.Background()
+	target := perfURL(origin.addr, "/small")
+
+	for i := 0; i < 3; i++ { // 暖连接 + 完成握手
+		perfDo(ctx, client, target, true)
+	}
+	var hot []time.Duration
+	for i := 0; i < 5; i++ {
+		if s := perfDo(ctx, client, target, true); s.err == nil {
+			hot = append(hot, s.ttfb)
+		}
+	}
+	// 空闲 35s：> 旧窗口 30s，< 新窗口 180s
+	time.Sleep(35 * time.Second)
+	s := perfDo(ctx, client, target, true)
+	if s.err != nil {
+		t.Fatalf("post-idle request failed: %v", s.err)
+	}
+	p50, _, _, _, _, _ := perfPercentiles(hot)
+	t.Logf("IDLE_AB idle_timeout=%s hot_p50=%s post_idle_first=%s",
+		chainedIdleConnTimeout, p50.Round(100*time.Microsecond), s.ttfb.Round(100*time.Microsecond))
+}
