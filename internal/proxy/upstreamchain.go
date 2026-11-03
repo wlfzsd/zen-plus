@@ -65,10 +65,36 @@ const (
 	// HTTP/1.1 per-request connections isolate failures and make the
 	// maxIdleConnsPerHost=16 pool meaningful again.
 	chainedResponseHeaderTimeout = 30 * time.Second
-	chainedIdleConnTimeout       = 30 * time.Second
 	// chainedForceHTTP1 flips the upstream TLS ALPN to HTTP/1.1 only.
 	chainedForceHTTP1 = false
 )
+
+// chainedIdleConnTimeout 决定链式出站连接（h1 连接池条目 / h2 客户端连接）
+// 空闲多久后关闭。取值来自实测而不是直觉（2026-11-03 深度优化，测量台
+// internal/proxy/zz_perfbench_test.go 的 TestPerfIdleReuse）：
+//
+//   - 200ms RTT 的上游链上，热连接请求 TTFB p50 = 206ms；
+//   - 同一条链路，出站连接池被清空后（= 空闲超过旧值 30s 后浏览器再发请求）
+//     首请求 TTFB p50 = 417ms —— 即每个目标多付 1 个 RTT（实测 +211ms）；
+//   - 浏览器侧（Chrome）对同一代理的隧道会保持 5-6 分钟，Zen 侧 30s 就丢掉
+//     出站连接，于是"离开标签页半分钟回来"这种最常见的动作每次都要重付握手。
+//
+// 30s 的原始理由（经验记录 2026-09-18）是"上游抖动后别留尸体、别在上游堆
+// 连接"，而当时只归因、没有 A/B 数字。现在把空闲窗放到 180s（仍远小于
+// Chrome 的 5-6 分钟，且 h2 腿本就有 20s PING 活性检查、h1 腿有 transport
+// 自带的幂等重试兜底），把"回来第一下"的握手从常规成本降为罕见成本。
+// 回滚开关：ZEN_CHAIN_IDLE_TIMEOUT=30s（无需重编译）。
+var chainedIdleConnTimeout = chainedIdleTimeoutFromEnv()
+
+func chainedIdleTimeoutFromEnv() time.Duration {
+	const fallback = 180 * time.Second
+	if v := os.Getenv("ZEN_CHAIN_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
+}
 
 // upstreamProvider hands the app-settings value of the upstream proxy to this
 // package. It is installed once by the app layer at startup

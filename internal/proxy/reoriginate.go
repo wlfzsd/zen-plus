@@ -213,13 +213,39 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 	// errors, so the request waited until the client gave up.
 	guardCtx, cancelGuard := context.WithCancel(req.Context())
 	var guardFired atomic.Bool
+	// guardDone makes the guard fire at most once and lets the success path
+	// claim it first. Without the claim, a timer that fired between RoundTrip
+	// returning headers and the Stop() below would cancel guardCtx *after* the
+	// response was accepted: the body streams under guardCtx, so the transfer
+	// would be cut mid-flight and writeResp would abort the whole inbound
+	// connection (2026-11-03 竞态修复). Whoever wins the CompareAndSwap owns
+	// the outcome.
+	var guardDone atomic.Bool
 	guardTimer := time.AfterFunc(chainedH2TTFBTimeout, func() {
-		guardFired.Store(true)
-		cancelGuard()
+		if guardDone.CompareAndSwap(false, true) {
+			guardFired.Store(true)
+			cancelGuard()
+		}
 	})
 	freq := toFhttpRequest(req.WithContext(guardCtx), facts)
 	resp, err := t2.RoundTrip(freq)
-	guardTimer.Stop()
+	if guardDone.CompareAndSwap(false, true) {
+		guardTimer.Stop()
+	}
+	// The guard won the race: guardCtx is already canceled, so whatever body
+	// came back is a dead stream. Treat it exactly like a TTFB timeout (the
+	// h1 mirror leg completes the request) instead of handing a half-dead body
+	// to the client.
+	guardCut := guardFired.Load()
+	if guardCut {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		resp = nil
+		if err == nil {
+			err = errH2TTFBTimeout
+		}
+	}
 	_ = cancelGuard // deliberately not called on the success path: the body
 	// streams under guardCtx and canceling here would cut long transfers. No
 	// leak: the timer is stopped and guardCtx dies with req.Context().
@@ -227,7 +253,8 @@ func (m *mimicRoundTripper) roundTripH2(req *http.Request, facts *connFacts) (*h
 		m.clearH2Failures(addr)
 		return fromFhttpResponse(resp, req), nil
 	}
-	isTTFB, isClientCancel := classifyH2RoundTripErr(err, guardFired.Load())
+	isTTFB, isClientCancel := classifyH2RoundTripErr(err, guardCut)
+	isTTFB = isTTFB || guardCut
 	if isTTFB {
 		err = fmt.Errorf("%w: %s after %v without response headers", errH2TTFBTimeout, redacted.Redacted(addr), chainedH2TTFBTimeout)
 	}
@@ -330,6 +357,14 @@ func (m *mimicRoundTripper) h2TransportFor(addr string, facts *connFacts) *fhttp
 		return t
 	}
 	if len(m.h2t) >= 1024 {
+		// Drop the whole map, but retire the transports first: each one owns an
+		// idle h2 connection (and its read loop) whose IdleConnTimeout timer
+		// only starts once the transport decides the conn is idle. Losing the
+		// only reference without closing leaves those connections parked for
+		// the full idle window instead of being released now.
+		for _, t := range m.h2t {
+			t.CloseIdleConnections()
+		}
 		m.h2t = make(map[string]*fhttp2.Transport)
 	}
 

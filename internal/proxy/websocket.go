@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"io"
 	"log"
@@ -50,7 +51,8 @@ func (p *Proxy) hijackAndTunnelWebsocket(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	if err := websocketHandshake(req, targetConn, clientConn); err != nil {
+	targetConn, err = websocketHandshake(req, targetConn, clientConn)
+	if err != nil {
 		return
 	}
 
@@ -64,12 +66,20 @@ func (p *Proxy) hijackAndTunnelWebsocket(w http.ResponseWriter, req *http.Reques
 	linkBidirectionalTunnel(targetConn, clientConn)
 }
 
-func websocketHandshake(req *http.Request, targetConn io.ReadWriter, clientConn io.ReadWriter) error {
+// websocketHandshake relays the client's upgrade request to the backend and the
+// backend's 101 back to the client. It returns the connection the tunnel must
+// read from, which is not always targetConn: the backend may push frames in the
+// same packet as the 101 (Socket.IO answers with its "0{...}" connect packet,
+// many servers push a greeting frame), and those bytes are already consumed into
+// the buffered reader. Returning the raw conn would strand them and the client
+// would wait forever for a frame the proxy had swallowed - so they are replayed
+// ahead of the tunnel (same shape as the CONNECT tunnel's prefixConn).
+func websocketHandshake(req *http.Request, targetConn net.Conn, clientConn io.ReadWriter) (net.Conn, error) {
 	err := req.Write(targetConn)
 	if err != nil {
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		log.Printf("writing websocket request to backend(%s): %v", redacted.Redacted(req.URL.Host), err)
-		return err
+		return nil, err
 	}
 
 	targetReader := bufio.NewReader(targetConn)
@@ -78,17 +88,27 @@ func websocketHandshake(req *http.Request, targetConn io.ReadWriter, clientConn 
 	if err != nil {
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		log.Printf("reading websocket response from backend(%s): %v", redacted.Redacted(req.URL.Host), err)
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	err = resp.Write(clientConn)
 	if err != nil {
 		log.Printf("writing websocket response to client(%s): %v", redacted.Redacted(req.URL.Host), err)
-		return err
+		return nil, err
 	}
 
-	return nil
+	var tunneled net.Conn = targetConn
+	if n := targetReader.Buffered(); n > 0 {
+		prefix, perr := targetReader.Peek(n)
+		if perr != nil {
+			return nil, perr
+		}
+		buffered := make([]byte, n)
+		copy(buffered, prefix)
+		tunneled = &prefixConn{Conn: targetConn, r: io.MultiReader(bytes.NewReader(buffered), targetConn)}
+	}
+	return tunneled, nil
 }
 
 func isWS(r *http.Request) bool {
