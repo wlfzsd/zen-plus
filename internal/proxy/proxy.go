@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +36,23 @@ const (
 
 	maxIdleConns        = 512
 	maxIdleConnsPerHost = 16
+
+	// transparentHostRetryBase is how long a host stays on the tunnel path
+	// after its first MITM-only TLS failure, and transparentHostRetryMax caps
+	// the exponential backoff for hosts that keep failing. The latch used to be
+	// permanent for the life of the proxy, so one transient TLS error (a flaky
+	// upstream chain, a half-open socket, a corrupted record) silently disabled
+	// filtering for that host - and every subdomain - until the proxy was
+	// stopped and started again (2026-11-20 yt-ads-latch: YouTube ads came back
+	// and only a proxy toggle cleared them).
+	transparentHostRetryBase = time.Minute
+	transparentHostRetryMax  = 10 * time.Minute
+
+	// transparentHostForgetAfter drops latch entries this long past their retry
+	// deadline. A host that keeps failing refreshes the deadline on every
+	// attempt, so only hosts that healed (or were never contacted again) are
+	// forgotten, which keeps the slice from growing without bound.
+	transparentHostForgetAfter = time.Hour
 )
 
 // certGenerator is an interface capable of generating certificates for the proxy.
@@ -67,7 +86,12 @@ type Proxy struct {
 	localHandler          http.Handler
 	transparentHosts      []string
 	transparentHostsSet   map[string]struct{}
+	transparentLatches    map[string]*latchState
 	transparentHostsMu    sync.RWMutex
+	// transparentLatchCount mirrors len(transparentHostsSet) so the hot paths
+	// can skip the mutex whenever nothing is latched (the overwhelmingly
+	// common case).
+	transparentLatchCount atomic.Int32
 	// h2Server serves the inbound MITM leg's HTTP/2 connections (2026-10-07
 	// h2-mirror). Registering TLSNextProto["h2"] on the per-connection inner
 	// server routes h2 conns here instead of net/http's bundled setup, which
@@ -101,6 +125,13 @@ type tunnelPair struct {
 	remote net.Conn
 }
 
+// latchState is the per-host bookkeeping for a host pinned to the tunnel path
+// after a MITM-only TLS failure.
+type latchState struct {
+	failures int
+	retryAt  time.Time
+}
+
 // NewProxy creates a proxy. localHost and localHandler, when set, name a host
 // the proxy answers for itself: requests to it are served by localHandler
 // instead of being forwarded upstream. Both must be set together or both left
@@ -125,6 +156,7 @@ func NewProxy(filter filter, certGenerator certGenerator, port int, shouldProxy 
 		localHandler:  localHandler,
 
 		transparentHostsSet: make(map[string]struct{}),
+		transparentLatches:  make(map[string]*latchState),
 
 		innerServers: make(map[*http.Server]struct{}),
 		tunnels:      make(map[*tunnelPair]struct{}),
@@ -495,9 +527,7 @@ func (p *Proxy) proxyConnect(w http.ResponseWriter, connReq *http.Request, proce
 	// MITM'd, repeated failures would keep appending it without bound.
 	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
 		if !isLocal && isTLSError(err) {
-			log.Printf("adding %s to ignored hosts", redacted.Redacted(host))
-			taplog.Log(map[string]any{"kind": "latch", "host": host, "leg": "inbound", "err": err.Error()})
-			p.addTransparentHost(host)
+			p.latchHost(host, "inbound", err)
 		}
 		log.Printf("TLS handshake(%s): %v", redacted.Redacted(connReq.Host), err)
 		return
@@ -659,13 +689,17 @@ func (p *Proxy) connectHandler(connReq *http.Request, host string, ln *singleCon
 				taplog.Log(map[string]any{"kind": "rt_error", "host": host, "err": err.Error()})
 			}
 			if isTLSError(err) {
-				log.Printf("adding %s to ignored hosts", redacted.Redacted(host))
-				taplog.Log(map[string]any{"kind": "latch", "host": host, "leg": "outbound", "err": err.Error()})
-				p.addTransparentHost(host)
+				p.latchHost(host, "outbound", err)
 			}
 			log.Printf("roundtrip(%s): %v", redacted.Redacted(connReq.Host), err)
 			writeUpstreamError(w, req, err)
 			return
+		}
+		// A successful round trip proves the host can be MITM'd again: drop
+		// any expired-by-now-but-still-recorded latch so the next connection
+		// does not pay another backoff cycle.
+		if p.transparentLatchCount.Load() > 0 {
+			p.clearLatch(host, "roundtrip ok")
 		}
 		if os.Getenv("ZEN_H1_DEBUG") == "1" {
 			log.Printf("[H1DBG] roundtrip ok: host=%s status=%d proto=%s CL=%q CE=%q TE=%v",
@@ -696,8 +730,16 @@ func (p *Proxy) shouldMITM(host string) bool {
 	p.transparentHostsMu.RLock()
 	defer p.transparentHostsMu.RUnlock()
 
+	now := time.Now()
 	for _, transparentHost := range p.transparentHosts {
-		if host == transparentHost || strings.HasSuffix(host, "."+transparentHost) {
+		if host != transparentHost && !strings.HasSuffix(host, "."+transparentHost) {
+			continue
+		}
+		// A latch is a retry window, not a life sentence: once retryAt passes,
+		// MITM is attempted again. Without that expiry a single transient TLS
+		// error kept the host - and every subdomain - unfiltered until the
+		// proxy restarted (2026-11-20 yt-ads-latch).
+		if state, ok := p.transparentLatches[transparentHost]; ok && now.Before(state.retryAt) {
 			return false
 		}
 	}
@@ -705,24 +747,145 @@ func (p *Proxy) shouldMITM(host string) bool {
 	return true
 }
 
-// addTransparentHost adds a host to the list of hosts that should be MITM'd.
+// addTransparentHost records a MITM-only TLS failure for host and returns how
+// long the host will stay on the tunnel path before MITM is retried.
 // Duplicate entries are skipped: TLS-failing hosts (cert-pinned apps retrying
 // over days) used to append a fresh copy of the same host on every failure,
 // growing the slice without bound and stretching the linear scan in
 // shouldMITM (2026-10-03 memory audit: the only unbounded container in the
-// codebase).
-func (p *Proxy) addTransparentHost(host string) {
+// codebase). Repeated failures for the same host back off exponentially so a
+// genuinely unpinnable host does not pay a failed handshake on every retry,
+// while a host that only failed transiently heals as soon as one attempt
+// succeeds (see clearLatch).
+func (p *Proxy) addTransparentHost(host string) time.Duration {
 	p.transparentHostsMu.Lock()
 	defer p.transparentHostsMu.Unlock()
 
+	p.initLatchStateLocked()
+
+	now := time.Now()
+	state, ok := p.transparentLatches[host]
+	if !ok {
+		state = &latchState{}
+		p.transparentLatches[host] = state
+	}
+	state.failures++
+	retryIn := transparentHostRetryDelay(state.failures)
+	state.retryAt = now.Add(retryIn)
+
+	if _, exists := p.transparentHostsSet[host]; !exists {
+		p.transparentHostsSet[host] = struct{}{}
+		p.transparentHosts = append(p.transparentHosts, host)
+		p.transparentLatchCount.Add(1)
+	}
+
+	p.forgetHealedLatchesLocked(now)
+
+	return retryIn
+}
+
+// clearLatch removes host from the latch list after a successful MITM, so the
+// next failure starts from the short retry window instead of inheriting an
+// inflated backoff. Reports whether an entry was removed.
+func (p *Proxy) clearLatch(host, reason string) bool {
+	p.transparentHostsMu.Lock()
+
+	if _, ok := p.transparentHostsSet[host]; !ok {
+		p.transparentHostsMu.Unlock()
+		return false
+	}
+	delete(p.transparentHostsSet, host)
+	delete(p.transparentLatches, host)
+	for i, latched := range p.transparentHosts {
+		if latched == host {
+			p.transparentHosts = append(p.transparentHosts[:i], p.transparentHosts[i+1:]...)
+			break
+		}
+	}
+	p.transparentLatchCount.Add(-1)
+	p.transparentHostsMu.Unlock()
+
+	log.Printf("latch cleared for host fp=%s (%s)", hostFingerprint(host), reason)
+	return true
+}
+
+// latchHost pins host to the tunnel path after a MITM-only TLS failure and logs
+// the decision. The host itself is redacted in production builds, so the log
+// carries a stable fingerprint instead: it identifies a host across restarts
+// (recompute sha256(host) for a candidate) without writing the hostname to disk.
+func (p *Proxy) latchHost(host, leg string, err error) {
+	retryIn := p.addTransparentHost(host)
+	fingerprint := hostFingerprint(host)
+	watched := taplog.WatchedHost(host)
+	log.Printf("adding %s to ignored hosts (fp=%s watched=%t leg=%s retry_in=%s)",
+		redacted.Redacted(host), fingerprint, watched, leg, retryIn)
+	taplog.Log(map[string]any{
+		"kind": "latch", "host": host, "leg": leg, "err": err.Error(),
+		"fp": fingerprint, "watched": watched, "retry_in": retryIn.String(),
+	})
+}
+
+// initLatchStateLocked makes the latch containers usable on a zero-value Proxy
+// (tests construct one without NewProxy).
+func (p *Proxy) initLatchStateLocked() {
 	if p.transparentHostsSet == nil {
 		p.transparentHostsSet = make(map[string]struct{})
 	}
-	if _, ok := p.transparentHostsSet[host]; ok {
+	if p.transparentLatches == nil {
+		p.transparentLatches = make(map[string]*latchState)
+	}
+}
+
+// forgetHealedLatchesLocked drops entries that are long past their retry
+// deadline. shouldMITM already ignores them; removing them keeps the linear
+// scan and the map small.
+func (p *Proxy) forgetHealedLatchesLocked(now time.Time) {
+	if len(p.transparentHosts) == 0 {
 		return
 	}
-	p.transparentHostsSet[host] = struct{}{}
-	p.transparentHosts = append(p.transparentHosts, host)
+	kept := p.transparentHosts[:0]
+	for _, host := range p.transparentHosts {
+		state, ok := p.transparentLatches[host]
+		if ok && now.Sub(state.retryAt) > transparentHostForgetAfter {
+			delete(p.transparentLatches, host)
+			delete(p.transparentHostsSet, host)
+			p.transparentLatchCount.Add(-1)
+			continue
+		}
+		kept = append(kept, host)
+	}
+	// Zero the tail so the dropped strings can be collected.
+	for i := len(kept); i < len(p.transparentHosts); i++ {
+		p.transparentHosts[i] = ""
+	}
+	p.transparentHosts = kept
+}
+
+// transparentHostRetryDelay returns the backoff before MITM is retried for a
+// host that has failed failures times in a row.
+func transparentHostRetryDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := transparentHostRetryBase
+	for i := 1; i < failures; i++ {
+		if delay >= transparentHostRetryMax {
+			return transparentHostRetryMax
+		}
+		delay *= 2
+	}
+	if delay > transparentHostRetryMax {
+		return transparentHostRetryMax
+	}
+	return delay
+}
+
+// hostFingerprint returns a stable, non-reversible tag for host: sha256 of the
+// lowercased host, first 8 bytes hex. Identical to sha256(host)[:16] so a
+// candidate hostname can be matched against the log offline.
+func hostFingerprint(host string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(host)))
+	return hex.EncodeToString(sum[:8])
 }
 
 // tunnel tunnels the connection between the client and the remote server
