@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/irbis-sh/zen-desktop/internal/exemption"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/contenttype"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 )
 
@@ -111,7 +112,11 @@ func cutModifierName(modifier string) (name string, hasValue bool) {
 // load-bearing and frozen (B2 red line), as is its exclusion from the asset
 // exemption query.
 func (er *ExceptionRule) IsBare() bool {
-	return !er.Document && !er.All && !er.Popup &&
+	// 2026-11-20 (learn-from-upstream b09b676): a content type is a
+	// condition now that it lives outside condMods — `@@||host^$~document`
+	// is not the bare cancel-everything whitelist.
+	return !er.HasContentTypeCondition() &&
+		!er.Document && !er.All && !er.Popup &&
 		!er.Elemhide && !er.Generichide && !er.Specifichide && !er.Genericblock &&
 		!er.URLBlock && !er.Jsinject && !er.Content && !er.Extension && !er.Stealth &&
 		len(er.AndConditionModifiers()) == 0 && len(er.OrConditionModifiers()) == 0 &&
@@ -347,6 +352,18 @@ func (er *ExceptionRule) cancelsActionQueryStructural(r *rule.Rule) bool {
 // ShouldMatchReq returns true if the rule should match the request.
 func (er *ExceptionRule) ShouldMatchReq(req *http.Request) bool {
 	return er.ModifiersMatchReq(req)
+}
+
+// ShouldMatchReqT is ShouldMatchReq with the request content type the caller
+// already classified (2026-11-20, learn-from-upstream b09b676).
+func (er *ExceptionRule) ShouldMatchReqT(req *http.Request, ct contenttype.Type) bool {
+	return er.ModifiersMatchReqT(req, ct)
+}
+
+// ShouldMatchResT is ShouldMatchRes with the response content type the caller
+// already classified (2026-11-20, learn-from-upstream b09b676).
+func (er *ExceptionRule) ShouldMatchResT(req *http.Request, res *http.Response, ct contenttype.Type) bool {
+	return er.ModifiersMatchResT(req, res, ct)
 }
 
 // ShouldMatchRes returns true if the rule should match the response produced

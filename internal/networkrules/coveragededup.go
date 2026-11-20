@@ -133,7 +133,10 @@ func classifyCovDomain(pattern string) (string, covKind) {
 // covEligible 仅认无条件/无动作规则：含条件或动作修饰符的规则之间的
 // 包含关系不做判定（保守排除）。
 func covEligible(r *rule.Rule) bool {
-	return len(r.AndConditionModifiers()) == 0 && len(r.OrConditionModifiers()) == 0 &&
+	// 2026-11-20 (learn-from-upstream b09b676): content types left condMods and
+	// became their own field, so they are checked explicitly here.
+	return !r.HasContentTypeCondition() &&
+		len(r.AndConditionModifiers()) == 0 && len(r.OrConditionModifiers()) == 0 &&
 		len(r.ActionModifiers()) == 0 && len(r.QueryModifiers()) == 0
 }
 

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/contenttype"
 )
 
 func TestParseModifiers(t *testing.T) {
@@ -81,6 +83,15 @@ func TestParseModifiers(t *testing.T) {
 			t.Fatalf("ParseModifiers() = %v, want nil", err)
 		}
 
+		// 2026-11-20 (learn-from-upstream b09b676): content types are a bit set
+		// on the rule instead of one OR condition modifier each.
+		if want := contenttype.All &^ contenttype.Mask(contenttype.Document|contenttype.Websocket|contenttype.Ping); r.ctTypes != want {
+			t.Fatalf("ctTypes = %b, want %b", r.ctTypes, want)
+		}
+		if !r.HasContentTypeCondition() {
+			t.Fatalf("HasContentTypeCondition() = false, want true")
+		}
+
 		assertRuleBuckets(t, &r, false, false,
 			[]string{
 				"*rulemodifiers.DomainModifier",
@@ -88,18 +99,7 @@ func TestParseModifiers(t *testing.T) {
 				"*rulemodifiers.ThirdPartyModifier",
 				"*rulemodifiers.HeaderModifier",
 			},
-			[]string{
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-				"*rulemodifiers.ContentTypeModifier",
-			},
+			nil,
 			[]string{
 				"*rulemodifiers.RemoveParamModifier",
 				"*rulemodifiers.RemoveParamModifier",
@@ -138,9 +138,15 @@ func TestParseModifiers(t *testing.T) {
 			t.Fatalf("ParseModifiers() = %v, want nil", err)
 		}
 
+		// 2026-11-20 (learn-from-upstream b09b676): $script is a bit on the
+		// rule, so it no longer occupies an OR condition slot.
+		if want := contenttype.Mask(contenttype.Script); r.ctTypes != want {
+			t.Fatalf("ctTypes = %b, want %b", r.ctTypes, want)
+		}
+
 		assertRuleBuckets(t, &r, false, false,
 			[]string{"*rulemodifiers.DomainModifier"},
-			[]string{"*rulemodifiers.ContentTypeModifier"},
+			nil,
 			nil,
 			nil,
 		)

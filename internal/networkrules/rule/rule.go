@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/contenttype"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers/removejsconstant"
 )
@@ -46,6 +47,25 @@ type Rule struct {
 	// with $all are rejected at parse time (AdGuard restriction), so All is
 	// only ever set on primary rules.
 	All bool
+	// ctTypes is the rule's content-type set (2026-11-20, learn-from-upstream
+	// b09b676): positive types set bits, negated types clear them, and a rule
+	// whose content types are all negated starts from every type. Zero means
+	// "the rule names no content type", which matches every type — including
+	// Unknown, so untyped rules keep applying to traffic Zen cannot classify.
+	//
+	// This replaces the old model where each content type was its own
+	// condition modifier in the OR group: `$~stylesheet,~xmlhttprequest` used
+	// to mean "not a stylesheet OR not an XHR" (true for every request with
+	// Sec-Fetch-Dest) instead of "neither".
+	ctTypes contenttype.Mask
+	// ctSet records that the rule named at least one content type. Content
+	// types no longer live in condMods, so this flag keeps them out of the
+	// condition-free fast paths (noConds, IsBare, coverage dedup).
+	ctSet bool
+	// ctIncluded/ctExcluded are the parse-time accumulators for ctTypes; they
+	// are folded into ctTypes and cleared when ParseModifiers returns.
+	ctIncluded contenttype.Mask
+	ctExcluded contenttype.Mask
 	// Badfilter marks a rule carrying the $badfilter modifier (AdGuard doc
 	// #badfilter-modifier, 2026-10-08 B6). Such rules are never inserted
 	// into a rule store: networkrules collects them at parse time and
@@ -208,7 +228,6 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 		}
 
 		var modifier rulemodifiers.Modifier
-		var isOr bool // true if the modifier belongs to ruleCondMods.or.
 
 		if !hasValue {
 			// Flag modifiers.
@@ -241,10 +260,21 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 				"websocket",
 				"ping",
 				"other":
-				// Content types: negation is legal and is detected inside
-				// ContentTypeModifier.Parse, so no tilde check here.
-				modifier = &rulemodifiers.ContentTypeModifier{}
-				isOr = true
+				// Content types are a bit set on the rule, not condition
+				// modifiers (2026-11-20, learn-from-upstream b09b676):
+				// positive types set bits, negated types clear them, so
+				// `$~a,~b` means "neither a nor b" instead of "not a OR not b".
+				ct, ok := contenttype.ByName(name)
+				if !ok {
+					return fmt.Errorf("unknown content type %q", m)
+				}
+				if origTilde {
+					rm.ctExcluded |= contenttype.Mask(ct)
+				} else {
+					rm.ctIncluded |= contenttype.Mask(ct)
+				}
+				rm.ctSet = true
+				continue
 			case "third-party":
 				// '~third-party' is legal and is detected inside
 				// ThirdPartyModifier.Parse, so no tilde check here.
@@ -347,12 +377,11 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 
 		switch typed := modifier.(type) {
 		case rulemodifiers.ConditionModifier:
+			// Content types never reach this branch (they are folded into
+			// ctTypes above), so every remaining condition modifier is an AND
+			// condition — the OR group existed only for content types.
 			mods := rm.ensureCondMods()
-			if isOr {
-				mods.or = append(mods.or, typed)
-			} else {
-				mods.and = append(mods.and, typed)
-			}
+			mods.and = append(mods.and, typed)
 		case rulemodifiers.ActionModifier:
 			mods := rm.ensureActMods()
 			mods.action = append(mods.action, typed)
@@ -384,9 +413,28 @@ func (rm *Rule) ParseModifiers(modifiers []string) error {
 		}
 	}
 
+	// Fold the content-type accumulators into the rule's mask (2026-11-20,
+	// learn-from-upstream b09b676): a rule whose content types are all negated
+	// starts from every type. A rule whose positive and negated sets cancel out
+	// would match nothing, which AdGuard rejects at parse time — a zero mask
+	// means "matches everything", so accepting it would mean the opposite of
+	// what the rule asks for.
+	if rm.ctSet {
+		included := rm.ctIncluded
+		if included == 0 {
+			included = contenttype.All
+		}
+		rm.ctTypes = included &^ rm.ctExcluded
+		rm.ctIncluded, rm.ctExcluded = 0, 0
+		if rm.ctTypes == 0 {
+			return fmt.Errorf("negated content types exclude every included type")
+		}
+	}
+
 	// Load-time noConditions flag (2026-10-08 perf audit ③): condMods is
-	// nil exactly when no condition modifier was parsed.
-	rm.noConds = rm.condMods == nil
+	// nil exactly when no condition modifier was parsed. Content types are no
+	// longer condition modifiers, so ctSet keeps such rules off that fast path.
+	rm.noConds = rm.condMods == nil && !rm.ctSet
 
 	return nil
 }
@@ -507,6 +555,15 @@ func (rm *Rule) ShouldMatchReq(req *http.Request) bool {
 // rewrite-type exemption compose: a rule carrying both ($popup plus
 // action/query modifiers) is admitted through either path.
 func (rm *Rule) ShouldMatchReqNav(req *http.Request, isUserNav bool) bool {
+	return rm.ShouldMatchReqNavT(req, isUserNav, contenttype.FromRequest(req))
+}
+
+// ShouldMatchReqNavT is ShouldMatchReqNav with the request's content type
+// passed in, so a request is classified once by the caller instead of once per
+// candidate rule (2026-11-20, learn-from-upstream b09b676). The type check is
+// part of the rule's conditions: a rule naming a content type never matches
+// Unknown traffic (requests without Fetch Metadata).
+func (rm *Rule) ShouldMatchReqNavT(req *http.Request, isUserNav bool, ct contenttype.Type) bool {
 	if isUserNav && !rm.Document && !rm.All && !rm.Popup {
 		// 2026-10-08 (perf audit ③): condition-free rewrite rules — the
 		// generic $removeparam family, 1763 of the 2310 generic rules in
@@ -515,7 +572,7 @@ func (rm *Rule) ShouldMatchReqNav(req *http.Request, isUserNav bool) bool {
 		if rm.noConds {
 			return rm.hasRewriteAction() && !rm.badfilterDisabledFor(req)
 		}
-		return rm.hasRewriteAction() && rm.ModifiersMatchReq(req)
+		return rm.hasRewriteAction() && rm.ModifiersMatchReqT(req, ct)
 	}
 
 	// $popup applies the document content type with a special flag (AdGuard
@@ -527,7 +584,15 @@ func (rm *Rule) ShouldMatchReqNav(req *http.Request, isUserNav bool) bool {
 		return false
 	}
 
-	return rm.ModifiersMatchReq(req)
+	return rm.ModifiersMatchReqT(req, ct)
+}
+
+// HasContentTypeCondition reports whether the rule names a content type.
+// Content types live in ctTypes rather than in the condition modifier groups,
+// so callers that decide "does this rule have conditions" (bare-exception
+// checks, coverage dedup) must consult this flag too.
+func (rm *Rule) HasContentTypeCondition() bool {
+	return rm.ctSet
 }
 
 // hasRewriteAction reports whether the rule carries action or query
@@ -537,13 +602,30 @@ func (rm *Rule) hasRewriteAction() bool {
 	return len(rm.ActionModifiers()) > 0 || len(rm.QueryModifiers()) > 0
 }
 
-// ModifiersMatchReq returns true if the rule's matching modifiers match the request.
+// ModifiersMatchReq returns true if the rule's matching modifiers match the
+// request. It classifies the request's content type on demand; the request hot
+// path uses ModifiersMatchReqT with the type the caller already classified.
 func (rm *Rule) ModifiersMatchReq(req *http.Request) bool {
+	return rm.ModifiersMatchReqT(req, contenttype.FromRequest(req))
+}
+
+// ModifiersMatchReqT is ModifiersMatchReq with the request's content type
+// passed in (2026-11-20, learn-from-upstream b09b676), so the request is
+// classified once instead of once per candidate rule.
+func (rm *Rule) ModifiersMatchReqT(req *http.Request, ct contenttype.Type) bool {
 	// $badfilter disablement (2026-10-08 B6): a rule disabled post-load
 	// must not apply. ExceptionRule embeds Rule and evaluates exceptions
 	// through the same ShouldMatchReq → ModifiersMatchReq entry, so
 	// disablement covers exceptions as well (2026-10-08 merge).
 	if rm.badfilterDisabledFor(req) {
+		return false
+	}
+
+	// Content-type set (2026-11-20, learn-from-upstream b09b676): checked
+	// before the condition-free fast path because content types no longer live
+	// in condMods — a zero mask means "no content-type condition" and matches
+	// every type, Unknown included.
+	if !rm.ctTypes.Matches(ct) {
 		return false
 	}
 
@@ -578,12 +660,26 @@ func (rm *Rule) ModifiersMatchReq(req *http.Request) bool {
 // surface — docs L1519/L1600/L2297/L2869 define response-action effects on
 // "requests matching the rule").
 func (rm *Rule) ShouldMatchRes(req *http.Request, res *http.Response) bool {
-	return rm.ModifiersMatchRes(req, res)
+	return rm.ModifiersMatchResT(req, res, contenttype.FromResponse(req, res))
+}
+
+// ShouldMatchResT is ShouldMatchRes with the response's content type passed in
+// (2026-11-20, learn-from-upstream b09b676).
+func (rm *Rule) ShouldMatchResT(req *http.Request, res *http.Response, ct contenttype.Type) bool {
+	return rm.ModifiersMatchResT(req, res, ct)
 }
 
 // ModifiersMatchRes returns true if the rule's matching modifiers match the
-// response produced by req.
+// response produced by req. It classifies the response's content type on
+// demand; the response hot path uses ModifiersMatchResT with the type the
+// caller already classified.
 func (rm *Rule) ModifiersMatchRes(req *http.Request, res *http.Response) bool {
+	return rm.ModifiersMatchResT(req, res, contenttype.FromResponse(req, res))
+}
+
+// ModifiersMatchResT is ModifiersMatchRes with the response's content type
+// passed in (2026-11-20, learn-from-upstream b09b676).
+func (rm *Rule) ModifiersMatchResT(req *http.Request, res *http.Response, ct contenttype.Type) bool {
 	// $badfilter disablement (2026-10-08 B6), evaluated against the request
 	// that produced the response. B10 passes the request down explicitly —
 	// the previous res.Request read was nil in production (the proxy
@@ -593,6 +689,13 @@ func (rm *Rule) ModifiersMatchRes(req *http.Request, res *http.Response) bool {
 		if rm.badfilterDisabledFor(req) {
 			return false
 		}
+	}
+
+	// Content-type set (2026-11-20, learn-from-upstream b09b676): checked
+	// before the condition-free fast path because content types no longer live
+	// in condMods — a zero mask matches every type, Unknown included.
+	if !rm.ctTypes.Matches(ct) {
+		return false
 	}
 
 	// Condition-free rules (perf audit ③): the And/Or evaluation is

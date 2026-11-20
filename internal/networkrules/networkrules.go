@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/irbis-sh/zen-desktop/internal/exemption"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/contenttype"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/exceptionrule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rulemodifiers"
@@ -243,6 +244,10 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	// semantics); hoist the two header reads out of the per-rule evaluation.
 	isUserNav := req.Header.Get("Sec-Fetch-User") == "?1" && req.Header.Get("Sec-Fetch-Dest") == "document"
 
+	// 2026-11-20 (learn-from-upstream b09b676): classify the request once and
+	// hand the type to every candidate rule instead of re-deriving it per rule.
+	reqType := contenttype.FromRequest(req)
+
 	var eff effHosts
 	effP := (*effHosts)(nil)
 	if nr.domainGateOn {
@@ -256,7 +261,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 		defer nr.putReqScratch(reqScratch)
 	}
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
-		return r.ShouldMatchReqNav(req, isUserNav)
+		return r.ShouldMatchReqNavT(req, isUserNav, reqType)
 	})
 	if len(primaryRules) == 0 {
 		return nil, false, ""
@@ -268,7 +273,7 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 	exceptions = nr.liveExc.appendInto(reqURL, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-		return er.ShouldMatchReq(req)
+		return er.ShouldMatchReqT(req, reqType)
 	})
 
 	// 2026-10-08 (perf audit ②): classify the matched exceptions once
@@ -421,6 +426,12 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	restrictFrames := nr.frameScopedRules.Load() > 0
 	frameLoad := !restrictFrames || rulemodifiers.IsFrameLoad(req)
 
+	// 2026-11-20 (learn-from-upstream b09b676 / f655b88): classify the
+	// response once, and drop rules that carry no action modifier up front —
+	// ModifyRes only ever runs action modifiers, so such a rule can never
+	// modify the response and evaluating it is pure per-request garbage.
+	resType := contenttype.FromResponse(req, res)
+
 	var resEff effHosts
 	resEffP := (*effHosts)(nil)
 	if nr.domainGateOn {
@@ -434,7 +445,11 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 		defer nr.putResScratch(resScratch)
 	}
 	primaryRules = filterInPlace(primaryRules, func(r *rule.Rule) bool {
-		if !r.ShouldMatchRes(req, res) {
+		if len(r.ActionModifiers()) == 0 {
+			// No response-side action: cannot modify this response.
+			return false
+		}
+		if !r.ShouldMatchResT(req, res, resType) {
 			return false
 		}
 		if !frameLoad && r.FrameScoped {
@@ -453,7 +468,7 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 	exceptions = nr.liveExc.appendInto(url, exceptions)
 	defer nr.exceptionStore.putRes(exceptions)
 	exceptions = filterInPlace(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-		return er.ShouldMatchReq(req)
+		return er.ShouldMatchReqT(req, resType)
 	})
 
 	// Page (Referer) surface for $content and the content component of
@@ -511,7 +526,7 @@ func (nr *NetworkRules) ActiveExceptions(req *http.Request) exemption.Exemption 
 		if er.IsBare() || er.All {
 			continue
 		}
-		if !er.ShouldMatchReq(req) {
+		if !er.ShouldMatchReqT(req, contenttype.FromRequest(req)) {
 			continue
 		}
 		// 2026-10-08 (regression fix): action/query-scoped exceptions
@@ -591,7 +606,7 @@ func (nr *NetworkRules) pageExceptions(req *http.Request, scope func(*exceptionr
 	excs := nr.exceptionStore.Get(pageURL)
 	excs = nr.liveExc.appendInto(pageURL, excs)
 	return filterInPlace(excs, func(er *exceptionrule.ExceptionRule) bool {
-		return scope(er) && er.ShouldMatchReq(req)
+		return scope(er) && er.ShouldMatchReqT(req, contenttype.FromRequest(req))
 	})
 }
 
