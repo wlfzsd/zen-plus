@@ -1,17 +1,39 @@
 # Changelog
 
-## v0.25.1
+## v3.2.3
 
-### What's New
+### 引擎语义修复：内容类型位掩码 + 响应体按原编码回写
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+这一版是"向官方学习并修正本地地基"的两项，都是**会影响过滤是否生效**的正确性问题。
 
-Thank you for using Zen!
+### 1. 内容类型条件：`$~a,~b` 由恒真改为真实语义
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+- 旧实现把内容类型修饰符放进"或"条件组，导致否定多个类型（`$~stylesheet,~xmlhttprequest`）被当作"满足任一否定" → **任何请求都命中**，规则在错误类型上生效。
+- 新实现：解析期把内容类型累加成 12 位位掩码（`internal/networkrules/contenttype`），`$a,b` 取并集、`$~a,~b` 取补集，两者相遇时按 `included &^ excluded` 折叠；每请求只分类一次（按 `Sec-Fetch-Dest` 等元数据），全链路下传同一次判定。
+- 附带修正：`$~all` 解析报错、`~a,~b` 排除掉全部类型时解析报错（而不是静默恒真）；裸白名单（`@@` 无其他条件）不再把"只有内容类型条件"的规则算进去。
+
+### 2. 响应体改写：按原始编码回写，不再强设 UTF-8
+
+- 旧实现：任何走改写管道的响应体都会被重贴 `charset=utf-8`，GBK／Shift_JIS 页面改写后字节已损坏 → 注入的 scriptlet 与剪枝规则在该页面**静默失效**。
+- 新实现（`internal/httprewrite/rawbody.go`）：只解压不改 Content-Type；UTF-16 转 UTF-8 并如实改标；传统编码（GBK、Shift_JIS、windows-1251 等）解码交给处理器后**按原编码重新编码**、保留原 Content-Type；未知标签才嗅探并改标。
+
+### 3. 谓词下推
+
+响应阶段只执行"动作修饰符"，因此 `ModifyRes` 主循环现在先跳过没有任何动作修饰符的规则，减少无效匹配。
+
+### 与官方的三点差异（有意为之）
+
+1. **不做 Content-Type 回退分类**：官方在没有请求元数据时会拿响应 `Content-Type` 回退判定，这会让原生 App 的 JSON 响应开始命中 `$xmlhttprequest` 规则、把改写伸进浏览器未声明的负载。本地保持 2026-10-08 定下的 B10 语义——无法分类就不匹配带类型规则（`TestXhrNoMetadataLegacyFallback` 钉死）。
+2. **不做 `IsUTF8Script` 闸门**：该闸门防的是"二进制被当脚本改写"，本地改写在 ASCII 标记位插入、风险面不同，强行加会有误伤。
+3. **不做 GetHosts 原地过滤**：benchmark 显示响应阶段 99086 ns/op（通用动作）vs 79561 ns/op（无通用动作），差异来自语义要求本身。
+
+### 验证
+
+- `go test ./internal/networkrules/... ./internal/httprewrite/...` 全绿：内容类型语义 10 例、`$~a,~b` 对照 5 例、编码保真 3 例（GBK 改写后仍是 GBK 字节、UTF-8 头不变、UTF-16→UTF-8）
+- `go test ./internal/... -count=1` 23 包绿（唯一失败仍为环境性 `pid_test.go:20`）
+- 产物 sha256 `57B54610D90EEE80D6A604F6A3B85A8F3906250296CBB36D281837C46100BF57`，两次构建一致
+
+**机制细节、文件锚点、回滚方式**见 `变更台账.md` 的 `v3.2.3` 节。
 
 ## v0.25.0
 
