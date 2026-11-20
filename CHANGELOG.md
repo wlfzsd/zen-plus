@@ -1,17 +1,52 @@
 # Changelog
 
-## v0.25.1
+## v3.2.2
 
-### What's New
+# zen-plus v3.2.2
 
-* **No more Firefox local network prompts**
-  Firefox recently introduced [local network access control](https://support.mozilla.org/en-US/kb/control-personal-device-local-network-permissions-firefox), which asks for permission when a page connects to a local device. Zen loaded its injected page assets from 127.0.0.1, which triggered the prompt and blamed the site for a connection Zen was actually making. These assets are now served via a fake hostname, so the prompt no longer appears.
-* **Framework upgrade**
-  Upgraded Wails to v2.14.0, fixing a crash on Windows when downloading the WebView2 runtime.
+本版包含两块：①透明隧道粘滞失效修复（广告偶发漏拦的根因）；②官方 7 条零冲突提交移植。
 
-Thank you for using Zen!
+---
 
-**Full Changelog**: https://github.com/irbis-sh/zen-desktop/compare/v0.25.0...v0.25.1
+### 修复：偶发广告（透明隧道粘滞失效）
+
+**现象**：开着拦截时偶发看到 YouTube 广告，停止拦截再重新开启后立刻恢复。
+
+**根因**：Zen 的 fail-open 设计——任一 TLS 协议错误都会把该主机加入"不再解密"的透明列表，原实现**永久生效**（直到进程退出）、没有重试、生产日志还是脱敏的，所以用户在界面上看不出任何异常。一次瞬时握手错误就能让某站点在整个 Zen 生命周期内失去过滤。
+
+**修复**：透明列表改为**带退避的临时状态**——1 分钟后自动重试拦截，失败按 2/4/8 分钟退避、最长 10 分钟；期间每分钟一次成功连接即立即恢复过滤。日志新增主机指纹（`fp=` 十六进制短哈希）与 `retry_in=`，便于事后定位到底是哪个站点失效过。
+
+**副作用**：无。对确实无法解密的站点（固定自签证书等），最多每 10 分钟多一次握手尝试。
+
+### 验证
+
+- 生产日志实测：`adding ... to ignored hosts (fp=63ea507073cd4433 ... retry_in=1m0s)` → `latch cleared for host fp=... (roundtrip ok)` → 证书探测恢复为 Zen 自签 CA；同主机二次故障 `retry_in=2m0s`（退避生效）。
+- `go test ./internal/proxy -count=1` 全绿（新增 5 个用例：到期重试／退避封顶／清除后重拦／陈旧项回收／指纹稳定性）。
+
+**完整机制与文件锚点**见仓库根 `变更台账.md` 的 `v3.2.1` 节。
+
+---
+
+### 第二部分：上游同步：7 条零冲突提交（界面与本地化）
+
+从官方 Zen v0.28/v0.29 之间实测零冲突的提交里移植了 7 条，只动界面与工程配置，不碰过滤引擎：
+
+- **新增语言**：日语（ja-JP）、越南语（vi-VN）、匈牙利语（hu-HU）
+- **阻断页与代理错误页本地化**（22 个文件）
+- **前端错误提示本地化**（错误边界 toast）
+- **文件对话框**：用户点"取消"不再被当成失败弹错
+- **工程**：`task update-flake` 任务、删除多余的 `CLAUDE.md` 跳转
+
+### 兼容性
+
+本分支的引擎（域名门控、hostSplit、树侧 `$domain` 索引）与官方改动无交集：`internal/proxy` 在 v0.27.1→v0.29.0 之间只变过错误页三个文件。
+
+### 验证
+
+- `go build -tags prod ./...` EXIT 0；`go test ./internal/... -count=1` 23 个包全绿（唯一失败为环境性的 `internal/process/pid_test.go:20`，与本改动无关，同族工作树可复现）
+- 产物内含 hu-HU 字符串与 `latch cleared for host fp=` 标记
+
+**逐条机制与回滚**见 `变更台账.md` 的 `v3.2.2` 节；版本级摘要见 `CHANGELOG-plus.md`。
 
 ## v0.25.0
 
