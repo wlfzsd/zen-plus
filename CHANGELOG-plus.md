@@ -47,6 +47,7 @@
 ## 发布流程（每次发版照做）
 
 1. 改 `wails.json` 的 `productVersion`（本文件同步加一节）。
-2. 构建：`wails build -s -o Zen.exe -platform windows/amd64 -m -skipbindings -tags prod`（前端需先 `npm run build`）。
+2. 构建：`wails build -s -o Zen.exe -platform windows/amd64 -ldflags "-X github.com/irbis-sh/zen-desktop/internal/config.Version=vX.Y.Z -X github.com/irbis-sh/zen-desktop/internal/config.InstanceID=<保留原值> -X github.com/irbis-sh/zen-desktop/internal/config.NoSelfUpdate=true" -m -skipbindings -tags prod`（前端需先 `npm run build`）。
+   **版本号必须用 `-ldflags` 注入**：`internal/config/config.go:28` 的 `Version` 默认值是 `"development"`，只改 `wails.json` 而不注入的话，运行时日志与"关于"页都会显示 development（2026-11-20 实测踩过）。
 3. 备份现役 exe 到 `%LOCALAPPDATA%\Programs\Zen\backup\`，装机后用带 `-start` 启动并核对日志版本行。
 4. 提交 + 打标签 `vX.Y.Z`；GitHub 推送需用户登录（见 `zen-plus发布计划.md` 第四节，当前仍未授权）。
